@@ -1122,7 +1122,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/app", response_class=HTMLResponse)
 async def serve_frontend():
-    with open("static/index.html", "r") as f:
+    with open("static/index.html", "r", encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
 
 
