@@ -1,73 +1,74 @@
 # LLMFront 🤗
 
-Chat con cualquier modelo de **Hugging Face** desde una interfaz web moderna y configurable.
+[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 
-## Características
+**LLMFront** is a unified, self-hosted web interface that allows you to explore, download, and chat with Artificial Intelligence models (LLMs) both in the **cloud (via API)** and **locally offline** using your own CPU and GPU (native compatibility with Hugging Face `transformers`).
 
-- 🔍 **Explorador de modelos** – Busca entre miles de modelos de HF Hub
-- ⭐ **Modelos destacados** – Selección curada de los mejores modelos de chat
-- 💬 **Chat con streaming** – Respuestas en tiempo real token a token via SSE
-- ⚙️ **Configuración completa** – System prompt, temperatura, top-p, max tokens, etc.
-- 🎛️ **Presets rápidos** – Preciso, Balanceado, Creativo, Código
-- 💾 **Persistencia local** – Token y configuración se guardan en el browser
-- 📤 **Exportar chat** – Descarga la conversación en Markdown
-- 🌑 **Dark mode** – Diseño glassmorphism con acento HuggingFace
+## 🚀 Key Features
 
-## Requisitos
+- 🔍 **Model Explorer (API/Download)** – Search through thousands of models in the HF Hub via the Inference API or download them directly.
+- 💻 **Native Local Execution** – Download weights to disk and load them into RAM/VRAM in the background.
+- 🔌 **Smart Hardware Filter** – Filter web searches based on model sizes (Parameters: Millions/Billions) directly from the native UI (e.g., ≤ 3.5B for low RAM, >10B for high-end rigs).
+- ⚡ **Quantization Assistant (Memory Check)** – A dynamic interface that determines if you need full precision, 8-bit, or 4-bit loading based on your hardware before triggering an Out of Memory error.
+- 🌐 **Internationalization (i18n)** – Automatically translated UI and Base Context (System Prompt) according to your browser's language setting (🇦🇷 Spanish or 🇺🇸 English).
+- 💬 **Streaming Web Chat** – Fluid, uninterrupted streaming responses processed via Server-Sent Events (SSE).
+- ⚙️ **Full Configuration** – Freely edit Base Prompts, temperature, max tokens, top p, and repetition penalty.
+- 🤖 **Ollama Endpoints Mock** – Direct compatibility on `/api/generate`, `/api/chat`, and `/api/tags` routes that emulate native Ollama endpoints.
+- 🌑 **Glassmorphism UI** – Immersive dark visuals that are highly responsive on both mobile and PC.
 
-- Python 3.8+
-- Token de Hugging Face (gratis en https://huggingface.co/settings/tokens)
+## 📦 Requirements and Installation
 
-## Instalación y uso
+- Python 3.10+
+- (Recommended) NVIDIA GPU with CUDA support for efficient local generation.
+- Free Hugging Face Token (available at https://huggingface.co/settings/tokens)
+- (Optional) Free Groq API Key for AI Semantic Search capability (https://console.groq.com/keys)
+
+### Step-by-Step Installation
 
 ```bash
-# 1. Instalar dependencias
+# 1. Clone and Enter Directory
+git clone https://github.com/your-username/llmfront.git
+cd llmfront
+
+# 2. Required: Virtual Environment setup
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 
-# 2. (Opcional) Configurar token
+# 3. Setting Up API Keys (.env)
+# We provide a template file for you to copy:
 cp .env.example .env
-# Editar .env y poner tu HF_TOKEN
 
-# 3. Iniciar el servidor
+# Edit .env and paste your master tokens:
+# HF_TOKEN=hf_...
+# GROQ_API_KEY=gsk_...
+
+# 4. Start Uvicorn Master Server
 python main.py
-# o con el script:
-./run.sh
-
-# 4. Abrir en el browser
-# http://localhost:8000/app
 ```
+Open it in your browser (or on your phone within your local network) at: `http://localhost:8000`
 
-## Estructura
+## 🛠️ Code Structure
 
-```
+```text
 llmfront/
-├── main.py           # Backend FastAPI
-├── requirements.txt  # Dependencias Python
-├── run.sh            # Script de inicio
-├── .env.example      # Variables de entorno
+├── main.py           # Heavy FastAPI backend (Ollama mock + HuggingFace Local/Cloud manager)
+├── requirements.txt  # Python Libraries
+├── .gitignore        # Exclusions (prevents pushing heavy models_cache to your root)
 └── static/
-    ├── index.html    # Frontend principal
-    ├── style.css     # Estilos dark mode
-    └── app.js        # Lógica de la app
+    ├── index.html    # Core UI and DOM structure
+    ├── style.css     # Dark Neon-glass rendering CSS
+    ├── app.js        # JavaScript State Control engine
+    └── i18n.js       # Dynamic translation engine for bilingual menus
 ```
 
-## API Endpoints
+## 🧠 Common Troubleshooting
 
-| Método | Ruta | Descripción |
-|--------|------|-------------|
-| GET | `/models/featured` | Modelos curados |
-| POST | `/models/search` | Buscar modelos en HF Hub |
-| GET | `/models/{id}/info` | Info de un modelo |
-| POST | `/chat/stream` | Chat con streaming SSE |
-| POST | `/chat/complete` | Chat sin streaming |
-| GET | `/docs` | Swagger UI (FastAPI) |
+- **Python server restarts and kills downloads:** Make sure you are running `main.py` as strictly packaged. It includes a patch telling the *auto-reloader* to ignore massive HF-JSON background file drops to avoid infinite restart loops.
+- **LiteRT / .tflite / GGUF issues:** Getting an "unable to load tokenizer" error means you forced raw Python `transformers` to load a mobile or C++ binary format file. Try to filter and download only standard `.safetensors` variants when working strictly inside this frontend logic.
 
-## Modelos soportados
-
-Cualquier modelo con soporte para **Inference API** de HuggingFace y `chat_completion`. Recomendados:
-
+## 🤝 Recommended Models (Free to try on Cloud/Local)
 - `mistralai/Mistral-7B-Instruct-v0.3`
 - `meta-llama/Meta-Llama-3-8B-Instruct`
-- `google/gemma-2-9b-it`
 - `Qwen/Qwen2.5-7B-Instruct`
-- `microsoft/Phi-3.5-mini-instruct`

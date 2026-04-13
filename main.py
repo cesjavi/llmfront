@@ -76,6 +76,9 @@ class ModelSearchRequest(BaseModel):
     size_filter: str = "any"
     limit: int = 20
     hf_token: Optional[str] = None
+    use_ai_search: bool = False
+    
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 class DownloadRequest(BaseModel):
     model_id: str
@@ -541,12 +544,43 @@ def _guess_size_b(name: str, tags: list) -> float:
 @app.post("/models/search")
 async def search_models(req: ModelSearchRequest):
     token = req.hf_token or HF_TOKEN
+    search_query = req.query
+    
+    # 🧠 Búsqueda Semántica Asistida por IA (Groq)
+    if req.use_ai_search and GROQ_API_KEY and search_query:
+        try:
+            groq_prompt = (
+                f"El usuario quiere buscar un modelo de inteligencia artificial open-source "
+                f"con esta intención: '{search_query}'. "
+                f"Dime 3 palabras clave perfectas para buscar en HuggingFace o 2 IDs completos de los mejores modelos exactos actuales. "
+                f"REGLA OBLIGATORIA: Responde SOLO con una cadena de texto separada por espacios para rellenar la barra de búsqueda. NADA MÁS."
+            )
+            groq_res = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama3-8b-8192",
+                    "messages": [{"role": "user", "content": groq_prompt}],
+                    "temperature": 0.2,
+                    "max_tokens": 50
+                },
+                timeout=5
+            )
+            groq_res.raise_for_status()
+            ai_reply = groq_res.json()["choices"][0]["message"]["content"].strip()
+            # Quitamos comillas si la IA listó algo
+            ai_reply = ai_reply.replace('"', '').replace("'", "")
+            search_query = f"{ai_reply}"
+            logger.info(f"AI Search Query transformed: '{req.query}' -> '{search_query}'")
+        except Exception as e:
+            logger.warning(f"Groq AI Search failed, falling back to standard: {e}")
+
     try:
         headers = {}
         if token:
             headers["Authorization"] = f"Bearer {token}"
         fetch_limit = req.limit * 4 if req.size_filter != "any" else req.limit
-        params = {"search": req.query, "filter": req.task, "sort": "likes", "direction": -1, "limit": fetch_limit, "full": False}
+        params = {"search": search_query, "filter": req.task, "sort": "likes", "direction": -1, "limit": fetch_limit, "full": False}
         resp = requests.get("https://huggingface.co/api/models", params=params, headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()

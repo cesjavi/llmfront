@@ -171,8 +171,8 @@
           <div class="config-card-title">🌐 Idioma de respuesta (Atajos)</div>
         </div>
         <div class="preset-buttons" style="margin-top: 8px">
-          <button class="preset-btn" onclick="document.getElementById('systemPrompt').value='Eres un asistente experto, útil y preciso. Responde siempre en Español.'">🇪🇸 Español</button>
-          <button class="preset-btn" onclick="document.getElementById('systemPrompt').value='You are a helpful, expert and precise AI assistant. Always respond in English.'">🇬🇧 English</button>
+          <button class="preset-btn" onclick="document.getElementById('systemPrompt').value='Eres un asistente experto, útil y preciso. Responde siempre en Español.'; if(window.changeAppLanguage) { changeAppLanguage('es'); document.getElementById('appLangSelect').value='es'; }">🇦🇷 Español</button>
+          <button class="preset-btn" onclick="document.getElementById('systemPrompt').value='You are a helpful, expert and precise AI assistant. Always respond in English.'; if(window.changeAppLanguage) { changeAppLanguage('en'); document.getElementById('appLangSelect').value='en'; }">🇺🇸 English</button>
         </div>
       </div>
 
@@ -275,9 +275,12 @@
       <div class="model-search-bar">
         <div class="search-input-wrap">
           <svg class="search-icon" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input type="text" id="modelSearchInput" placeholder="Buscar modelo (ej: mistral, llama, qwen...)"
+          <input type="text" id="modelSearchInput" placeholder="Búsqueda Semántica con IA o modelo (ej: quiero uno para programar python)"
             class="search-input" oninput="debounceSearch()" />
         </div>
+        <label style="display:flex; align-items:center; gap:5px; color:var(--accent-hf); font-size:13px; margin:0 5px; cursor:pointer; font-weight:bold" title="Usa Groq API para entender lenguaje natural">
+          <input type="checkbox" id="aiSearchToggle" /> ✨ Búsqueda IA
+        </label>
         <select id="taskFilter" class="task-filter" onchange="debounceSearch()">
           <option value="text-generation">Text Generation</option>
           <option value="conversational">Conversational</option>

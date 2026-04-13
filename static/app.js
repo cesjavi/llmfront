@@ -428,6 +428,7 @@ async function searchModels() {
   const q = document.getElementById('modelSearchInput').value.trim();
   const task = document.getElementById('taskFilter').value;
   const size = document.getElementById('sizeFilter').value;
+  const use_ai = document.getElementById('aiSearchToggle')?.checked || false;
   const grid = document.getElementById('searchModelsGrid');
   const section = document.getElementById('searchResultsSection');
   section.style.display = 'block';
@@ -436,7 +437,7 @@ async function searchModels() {
     const res = await fetch(`${API_BASE}/models/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: q, task, limit: 24, hf_token: state.hfToken || undefined, size_filter: size }),
+      body: JSON.stringify({ query: q, task, limit: 24, hf_token: state.hfToken || undefined, size_filter: size, use_ai_search: use_ai }),
     });
     const data = await res.json();
     if (!data.models.length) {
