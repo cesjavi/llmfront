@@ -1,0 +1,17 @@
+# Entornos virtuales
+venv/
+env/
+.env
+
+# Modelos y cachés pesados
+models_cache/
+.cache/
+
+# Archivos de Python y sistema
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Mac / Linux
+.DS_Store

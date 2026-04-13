@@ -1,0 +1,19 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+huggingface_hub>=0.22.0
+sse-starlette>=1.8.2
+python-dotenv>=1.0.0
+requests>=2.31.0
+
+# ─── Inferencia Local ───────────────────────────────
+# Descomentar para habilitar ejecución local de modelos:
+transformers @ git+https://github.com/huggingface/transformers.git
+torch>=2.4.0
+Pillow>=10.0.0
+accelerate>=1.1.1
+bitsandbytes>=0.44.10   # Opcional: cuantización 4bit/8bit (requiere CUDA)
+psutil>=5.9.0           # Necesario para el chequeo de RAM en tiempo de ejecución
+protobuf>=3.20.0        # Necesario para cargar tokenizers de ciertos modelos (ej: Llama, Gemma, Mistral)
+sentencepiece>=0.1.99   # Requerido por tokenizers lentos de ciertos LLMs
+tiktoken>=0.7.0         # Requerido para modelos basados en BPE como Llama 3 o Qwen
+gguf>=0.6.0             # Necesario para que transformers cargue tokenizers desde archivos GGUF
