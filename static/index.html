@@ -65,7 +65,22 @@
   </div>
 
   <!-- Token Config -->
+  <div class="token-section">
+    <div class="section-label">HF TOKEN</div>
+    <div class="token-input-wrap">
+      <input type="password" id="hfTokenInput" class="token-input" placeholder="hf_..." />
+      <button class="change-model-btn token-save-btn" id="saveTokenBtn" title="Guardar token">💾</button>
     </div>
+    <div class="token-hint">Necesario para modo API. <a href="https://huggingface.co/settings/tokens" target="_blank">Obtener token</a></div>
+  </div>
+
+  <!-- Language -->
+  <div class="section-label" style="margin-top:16px">CONFIGURACIÓN APP</div>
+  <div style="padding: 0 4px">
+    <select id="appLangSelect" class="task-filter" style="width:100%;" onchange="changeAppLanguage(this.value)">
+      <option value="es">🇦🇷 Español (Interfaz)</option>
+      <option value="en">🇺🇸 English (Interface)</option>
+    </select>
   </div>
 </aside>
 
@@ -123,7 +138,7 @@
     <div class="input-area">
       <div class="input-row">
         <div class="textarea-wrap">
-          <input type="file" id="imageInput" accept="image/*" hidden />
+          <input type="file" id="imageInput" accept="image/*" multiple hidden />
           <div class="image-attachment" id="imageAttachment" style="display:none"></div>
           <textarea
             id="userInput"
@@ -135,14 +150,19 @@
             <span id="charCount">0 / 8000</span>
           </div>
         </div>
-        <button class="attach-btn" id="attachImageBtn" onclick="triggerImagePicker()" title="Adjuntar imagen" style="display:none">
-          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-        </button>
-        <button class="send-btn" id="sendBtn" onclick="sendMessage()" disabled>
-          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-        </button>
+        <div class="input-btns">
+            <button class="attach-btn" id="attachImageBtn" onclick="triggerImagePicker()" title="Adjuntar imagen" style="display:none">
+              <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </button>
+            <button class="attach-btn" id="cameraBtn" onclick="toggleCameraModal()" title="Tomar foto" style="display:none">
+              <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            </button>
+            <button class="send-btn" id="sendBtn" onclick="sendMessage()" disabled>
+              <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            </button>
+        </div>
       </div>
-      <div class="vision-hint" id="visionHint" style="display:none">El modo local admite una imagen por mensaje con este modelo.</div>
+      <div class="vision-hint" id="visionHint" style="display:none">Este modelo admite visión (podés adjuntar múltiples imágenes).</div>
       <div class="input-footer">
         <span>Modelo: <strong id="footerModel">—</strong></span>
         <span>Modo: <strong id="footerMode">API ☁️</strong></span>
@@ -426,8 +446,28 @@
       <button onclick="loadLocalModel()" class="modal-confirm-btn" id="dlLoadBtn">
         🧠 Cargar en memoria
       </button>
-      <button onclick="useLocalModel()" class="modal-confirm-btn" style="background:linear-gradient(135deg,#4ade80,#22c55e);color:#000;" id="dlUseBtn" style="display:none">
+      <button onclick="useLocalModel()" class="modal-confirm-btn" style="background:linear-gradient(135deg,#4ade80,#22c55e);color:#000;" id="dlUseBtn">
         ✅ Usar este modelo
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ MODAL: CAMERA ══════════════ -->
+<div class="modal-overlay" id="cameraModal" style="display:none">
+  <div class="modal camera-modal">
+    <div class="modal-header">
+      <div class="modal-icon">📸</div>
+      <h3 data-orig="Cámara">Cámara</h3>
+    </div>
+    <div class="camera-container">
+      <video id="cameraVideo" autoplay playsinline class="camera-video"></video>
+      <canvas id="cameraCanvas" style="display:none"></canvas>
+    </div>
+    <div class="modal-actions">
+      <button onclick="toggleCameraModal()" class="modal-cancel-btn">Cancelar</button>
+      <button onclick="takeSnapshot()" class="modal-confirm-btn">
+        📸 Capturar foto
       </button>
     </div>
   </div>
@@ -437,6 +477,6 @@
 <div class="toast" id="toast"></div>
 
 <script src="/static/i18n.js"></script>
-  <script src="/static/app.js?v=2"></script>
+<script src="/static/app.js?v=2"></script>
 </body>
 </html>

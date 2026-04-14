@@ -15,6 +15,7 @@ from pathlib import Path
 from io import BytesIO
 from threading import Thread, Lock
 from typing import AsyncGenerator, Optional
+from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -60,6 +61,10 @@ class Message(BaseModel):
     role: str
     content: str
 
+class ImageItem(BaseModel):
+    base64: str
+    mime_type: str
+
 class ChatRequest(BaseModel):
     model: str
     messages: list[Message]
@@ -71,8 +76,7 @@ class ChatRequest(BaseModel):
     stream: bool = True
     hf_token: Optional[str] = None
     use_local: bool = False          # True = usar modelo local descargado
-    image_base64: Optional[str] = None
-    image_mime_type: Optional[str] = None
+    images: Optional[list[ImageItem]] = None
 
 class ModelSearchRequest(BaseModel):
     query: str = ""
@@ -905,8 +909,27 @@ async def stream_hf_api(req: ChatRequest) -> AsyncGenerator[str, None]:
     messages = []
     if req.system_prompt:
         messages.append({"role": "system", "content": req.system_prompt})
+    
+    # Construir historial multimodal si hay imágenes
+    user_msgs_count = sum(1 for m in req.messages if m.role == "user")
+    current_user_msg_idx = 0
+    
     for msg in req.messages:
-        messages.append({"role": msg.role, "content": msg.content})
+        if msg.role == "user":
+            current_user_msg_idx += 1
+            if current_user_msg_idx == user_msgs_count and req.images:
+                content = []
+                for img in req.images:
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{img.mime_type};base64,{img.base64}"}
+                    })
+                content.append({"type": "text", "text": msg.content or "Describí las imágenes."})
+                messages.append({"role": "user", "content": content})
+            else:
+                messages.append({"role": msg.role, "content": msg.content})
+        else:
+            messages.append({"role": msg.role, "content": msg.content})
 
     try:
         stream = client.chat_completion(
@@ -957,30 +980,32 @@ async def stream_local(req: ChatRequest) -> AsyncGenerator[str, None]:
         processor = model_data.get("processor")
         model = model_data["model"]
         supports_vision = bool(model_data.get("supports_vision"))
-        image = None
+        images = []
 
-        if req.image_base64:
+        if req.images:
             if not supports_vision:
                 yield f"data: {json.dumps({'error': 'El modelo local cargado es solo texto y no acepta imágenes.'})}\n\n"
                 return
-            image_bytes = base64.b64decode(req.image_base64)
-            image = Image.open(BytesIO(image_bytes)).convert("RGB")
+            for img_item in req.images:
+                img_bytes = base64.b64decode(img_item.base64)
+                images.append(Image.open(BytesIO(img_bytes)).convert("RGB"))
 
         # Construir prompt con chat template si está disponible
         messages = []
         if req.system_prompt:
             messages.append({"role": "system", "content": req.system_prompt})
-        user_messages = list(req.messages)
-        for idx, msg in enumerate(user_messages):
-            is_last_user_with_image = image is not None and idx == len(user_messages) - 1 and msg.role == "user"
-            if is_last_user_with_image:
-                messages.append({
-                    "role": msg.role,
-                    "content": [
-                        {"type": "image"},
-                        {"type": "text", "text": msg.content or "Describí la imagen."},
-                    ],
-                })
+        
+        user_messages = [m for m in req.messages if m.role == "user"]
+        last_user_msg = user_messages[-1] if user_messages else None
+
+        for msg in req.messages:
+            is_last_user_with_images = images and msg == last_user_msg
+            if is_last_user_with_images:
+                content = []
+                for _ in images:
+                    content.append({"type": "image"})
+                content.append({"type": "text", "text": msg.content or "Describí las imágenes."})
+                messages.append({"role": "user", "content": content})
             else:
                 messages.append({"role": msg.role, "content": msg.content})
 
@@ -997,21 +1022,22 @@ async def stream_local(req: ChatRequest) -> AsyncGenerator[str, None]:
                 parts.append(f"[SYSTEM] {req.system_prompt}")
             for msg in req.messages:
                 role = "Usuario" if msg.role == "user" else "Asistente"
-                prefix = "[Imagen] " if image is not None and msg == req.messages[-1] and msg.role == "user" else ""
+                has_img = images and msg == last_user_msg
+                prefix = f"[{len(images)} Imágenes] " if has_img else ""
                 parts.append(f"{role}: {prefix}{msg.content}")
             parts.append("Asistente:")
             input_text = "\n".join(parts)
 
-        if supports_vision and processor is not None and image is not None:
+        if supports_vision and processor is not None and images:
             inputs = processor(
-                images=image,
+                images=images if len(images) > 1 else images[0],
                 text=input_text,
+                padding=True,
                 return_tensors="pt",
             )
         else:
             inputs = tokenizer(input_text, return_tensors="pt")
 
-        # mover al mismo device del modelo
         try:
             device = next(model.parameters()).device
             inputs = {k: v.to(device) for k, v in inputs.items()}
@@ -1028,34 +1054,26 @@ async def stream_local(req: ChatRequest) -> AsyncGenerator[str, None]:
             **inputs,
             "streamer": streamer,
             "max_new_tokens": req.max_new_tokens,
+            "do_sample": req.temperature > 0,
             "temperature": req.temperature,
             "top_p": req.top_p,
             "repetition_penalty": req.repetition_penalty,
-            "do_sample": req.temperature > 0.01,
-            "pad_token_id": (tokenizer.eos_token_id if tokenizer and tokenizer.eos_token_id is not None else model.generation_config.pad_token_id),
+            "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id,
         }
 
-        # Generar en un hilo separado
-        gen_thread = threading.Thread(target=model.generate, kwargs=gen_kwargs, daemon=True)
-        gen_thread.start()
+        # Ejecutar en hilo para permitir streaming
+        thread = threading.Thread(target=model.generate, kwargs=gen_kwargs)
+        thread.start()
 
-        loop = asyncio.get_event_loop()
-
-        for token_text in streamer:
-            yield f"data: {json.dumps({'token': token_text})}\n\n"
-            await asyncio.sleep(0)  # ceder control al event loop
-
-        gen_thread.join(timeout=5)
+        for new_text in streamer:
+            yield f"data: {json.dumps({'token': new_text})}\n\n"
+        
         yield f"data: {json.dumps({'done': True})}\n\n"
 
     except Exception as e:
         logger.error(f"Local inference error: {e}")
         yield f"data: {json.dumps({'error': f'Error de inferencia local: {str(e)}'})}\n\n"
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# ENDPOINTS – Chat
-# ──────────────────────────────────────────────────────────────────────────────
 
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
@@ -1100,8 +1118,6 @@ async def chat_complete(req: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-import datetime
-
 @app.get("/api/tags")
 async def ollama_tags():
     """Ollama API: List downloaded models"""
@@ -1113,7 +1129,7 @@ async def ollama_tags():
                 models.append({
                     "name": model_id,
                     "model": model_id,
-                    "modified_at": datetime.datetime.now().isoformat() + "Z",
+                    "modified_at": datetime.now().isoformat() + "Z",
                     "size": int(_dir_size_gb(d) * 1e9),
                     "digest": "",
                     "details": {"format": "pytorch", "family": "", "parameter_size": "", "quantization_level": ""}
@@ -1137,14 +1153,14 @@ async def _ollama_stream(generator, is_chat=True, model_name=""):
             if is_chat:
                 yield json.dumps({
                     "model": model_name,
-                    "created_at": datetime.datetime.now().isoformat() + "Z",
+                    "created_at": datetime.now().isoformat() + "Z",
                     "message": {"role": "assistant", "content": data["token"]},
                     "done": False
                 }) + "\n"
             else:
                 yield json.dumps({
                     "model": model_name,
-                    "created_at": datetime.datetime.now().isoformat() + "Z",
+                    "created_at": datetime.now().isoformat() + "Z",
                     "response": data["token"],
                     "done": False
                 }) + "\n"
@@ -1153,14 +1169,14 @@ async def _ollama_stream(generator, is_chat=True, model_name=""):
             if is_chat:
                 yield json.dumps({
                     "model": model_name,
-                    "created_at": datetime.datetime.now().isoformat() + "Z",
+                    "created_at": datetime.now().isoformat() + "Z",
                     "message": {"role": "assistant", "content": ""},
                     "done": True
                 }) + "\n"
             else:
                 yield json.dumps({
                     "model": model_name,
-                    "created_at": datetime.datetime.now().isoformat() + "Z",
+                    "created_at": datetime.now().isoformat() + "Z",
                     "response": "",
                     "done": True
                 }) + "\n"
@@ -1193,7 +1209,7 @@ async def ollama_chat(req: OllamaChatRequest):
                     pass
         return {
             "model": req.model,
-            "created_at": datetime.datetime.now().isoformat() + "Z",
+            "created_at": datetime.now().isoformat() + "Z",
             "message": {"role": "assistant", "content": full_text},
             "done": True
         }
@@ -1227,12 +1243,11 @@ async def ollama_generate(req: OllamaGenerateRequest):
                     pass
         return {
             "model": req.model,
-            "created_at": datetime.datetime.now().isoformat() + "Z",
+            "created_at": datetime.now().isoformat() + "Z",
             "response": full_text,
             "done": True
         }
 
-# ─── Servir frontend ──────────────────────────────────────────────────────────
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/app", response_class=HTMLResponse)
