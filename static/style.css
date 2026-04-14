@@ -351,6 +351,15 @@ body {
 }
 .message.user { flex-direction: row-reverse; }
 
+.msg-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: min(75%, 560px);
+}
+.message.user .msg-content { align-items: flex-end; }
+.message.assistant .msg-content { align-items: flex-start; }
+
 .msg-avatar {
   width: 34px;
   height: 34px;
@@ -366,7 +375,8 @@ body {
 .message.assistant .msg-avatar { background: var(--accent-glow); border: 1px solid var(--border-active); }
 
 .msg-bubble {
-  max-width: 75%;
+  max-width: 100%;
+  min-width: 72px;
   padding: 12px 16px;
   border-radius: var(--radius-md);
   font-size: 14px;
@@ -409,6 +419,7 @@ body {
   color: var(--text-muted);
   margin-top: 4px;
   text-align: right;
+  width: 100%;
 }
 .message.assistant .msg-time { text-align: left; }
 
