@@ -10,13 +10,15 @@ import json
 import shutil
 import asyncio
 import logging
+import base64
 from pathlib import Path
+from io import BytesIO
 from threading import Thread, Lock
 from typing import AsyncGenerator, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from huggingface_hub import InferenceClient, snapshot_download
@@ -69,6 +71,8 @@ class ChatRequest(BaseModel):
     stream: bool = True
     hf_token: Optional[str] = None
     use_local: bool = False          # True = usar modelo local descargado
+    image_base64: Optional[str] = None
+    image_mime_type: Optional[str] = None
 
 class ModelSearchRequest(BaseModel):
     query: str = ""
@@ -344,8 +348,11 @@ def _load_model_thread(model_id: str, quantization: str, device: str):
 
         # HF Transformers / PyTorch
         import torch
-        from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
 
+        config = AutoConfig.from_pretrained(str(local_dir), trust_remote_code=True)
+        model_meta = _extract_model_meta(model_id, config=config.to_dict())
+        supports_vision = model_meta["supports_vision"]
 
         # Detectar device disponible respetando la preferencia del usuario
         use_cuda = torch.cuda.is_available() and device != "cpu"
@@ -396,7 +403,7 @@ def _load_model_thread(model_id: str, quantization: str, device: str):
             raise RuntimeError("Este es un modelo LiteRT (.litertlm). La herramienta transformers predeterminada de este proyecto web no puede cargarlo, ¡está pensado solo para móviles y web! Necesitas la versión original safetensors.")
 
         with _model_lock:
-            _download_state[key + "_load"]["message"] = "Cargando tokenizer..."
+            _download_state[key + "_load"]["message"] = "Cargando tokenizer/procesador..."
             _download_state[key + "_load"]["progress"] = 25
 
         # Detección de archivos GGUF
@@ -414,11 +421,20 @@ def _load_model_thread(model_id: str, quantization: str, device: str):
             gguf_kwargs["gguf_file"] = selected_gguf.name
             logger.info(f"Detectado modelo GGUF: usando archivo {selected_gguf.name}")
 
-        tokenizer = AutoTokenizer.from_pretrained(
-            str(local_dir),
-            trust_remote_code=True,
-            **gguf_kwargs
-        )
+        processor = None
+        tokenizer = None
+        if supports_vision and not is_gguf:
+            processor = AutoProcessor.from_pretrained(
+                str(local_dir),
+                trust_remote_code=True,
+            )
+            tokenizer = getattr(processor, "tokenizer", None)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(
+                str(local_dir),
+                trust_remote_code=True,
+                **gguf_kwargs
+            )
 
         with _model_lock:
             _download_state[key + "_load"]["message"] = "Cargando modelo (puede tardar varios minutos)..."
@@ -451,11 +467,13 @@ def _load_model_thread(model_id: str, quantization: str, device: str):
             model_kwargs["torch_dtype"] = dtype  # float16 si CUDA, float32 si CPU
 
         try:
-            model = AutoModelForCausalLM.from_pretrained(str(local_dir), **model_kwargs)
+            model_cls = AutoModelForImageTextToText if supports_vision and not is_gguf else AutoModelForCausalLM
+            model = model_cls.from_pretrained(str(local_dir), **model_kwargs)
         except Exception as load_err:
             logger.warning(f"First load attempt failed ({load_err}), retrying without dtype hints...")
             # Fallback: cargar sin optimizaciones (más lento pero compatible con todo)
-            model = AutoModelForCausalLM.from_pretrained(
+            model_cls = AutoModelForImageTextToText if supports_vision and not is_gguf else AutoModelForCausalLM
+            model = model_cls.from_pretrained(
                 str(local_dir),
                 trust_remote_code=True,
             )
@@ -478,14 +496,17 @@ def _load_model_thread(model_id: str, quantization: str, device: str):
         with _model_lock:
             _loaded_models[key] = {
                 "tokenizer": tokenizer,
+                "processor": processor,
                 "model": model,
                 "model_id": model_id,
                 "quantization": quantization,
+                "supports_vision": supports_vision,
+                "model_type": model_meta["model_type"],
             }
             _download_state[key + "_load"] = {
                 "status": "loaded",
                 "progress": 100,
-                "message": "✓ Modelo cargado y listo",
+                "message": "✓ Modelo cargado y listo" + (" (vision + texto)" if supports_vision else ""),
                 "model_id": model_id,
             }
         logger.info(f"Model loaded: {model_id}")
@@ -507,6 +528,11 @@ def _load_model_thread(model_id: str, quantization: str, device: str):
 
 @app.get("/")
 async def root():
+    return RedirectResponse(url="/app", status_code=307)
+
+
+@app.get("/health")
+async def health():
     return {"status": "ok", "version": "2.0.0", "local_support": True}
 
 
@@ -521,6 +547,11 @@ async def get_featured_models():
     models = []
     for m in FEATURED_MODELS:
         entry = dict(m)
+        entry.update(_extract_model_meta(
+            m["id"],
+            tags=m.get("tags", []),
+            description=m.get("description", ""),
+        ))
         entry["is_downloaded"] = _is_downloaded(m["id"])
         entry["is_partial"] = _is_partial(m["id"])
         key = _model_key(m["id"])
@@ -540,6 +571,43 @@ def _guess_size_b(name: str, tags: list) -> float:
     m = re.search(r'(?i)[_-](\d+(?:\.\d+)?)b[_-]', name)
     if m: return float(m.group(1))
     return -1
+
+
+def _extract_model_meta(model_id: str, tags: Optional[list] = None, pipeline_tag: str = "", description: str = "", config: Optional[dict] = None) -> dict:
+    tags = tags or []
+    config = config or {}
+    haystack = " ".join([
+        model_id or "",
+        pipeline_tag or "",
+        description or "",
+        config.get("model_type", "") or "",
+        " ".join(config.get("architectures", []) or []),
+        " ".join(tags),
+    ]).lower()
+    vision_keywords = (
+        "llava", "vision", "vlm", "image-text-to-text", "image text to text",
+        "idefics", "paligemma", "qwen2-vl", "qwen-vl", "smolvlm",
+        "cambrian", "bunny", "internvl", "minicpm-v", "glm-4v"
+    )
+    supports_vision = any(keyword in haystack for keyword in vision_keywords)
+    return {
+        "supports_vision": supports_vision,
+        "supports_local_chat": True,
+        "capability_label": "Vision + Texto" if supports_vision else "Solo texto",
+        "model_type": config.get("model_type", ""),
+        "architectures": config.get("architectures", []) or [],
+        "pipeline_tag": pipeline_tag or "",
+    }
+
+
+def _read_local_config(local_dir: Path) -> dict:
+    config_file = local_dir / "config.json"
+    if not config_file.exists():
+        return {}
+    try:
+        return json.loads(config_file.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 @app.post("/models/search")
 async def search_models(req: ModelSearchRequest):
@@ -588,6 +656,13 @@ async def search_models(req: ModelSearchRequest):
         for m in data:
             mid = m.get("modelId", m.get("id", ""))
             tags = m.get("tags", [])
+            description = (m.get("cardData", {}) or {}).get("description", "") or ""
+            meta = _extract_model_meta(
+                mid,
+                tags=tags,
+                pipeline_tag=m.get("pipeline_tag", ""),
+                description=description,
+            )
             
             if req.size_filter != "any":
                 size_b = _guess_size_b(mid, tags)
@@ -599,13 +674,14 @@ async def search_models(req: ModelSearchRequest):
             models.append({
                 "id": mid,
                 "name": mid,
-                "description": (m.get("cardData", {}) or {}).get("description", "") or "",
+                "description": description,
                 "tags": tags[:5],
                 "likes": m.get("likes", 0),
                 "downloads": m.get("downloads", 0),
                 "pipeline_tag": m.get("pipeline_tag", ""),
                 "is_downloaded": _is_downloaded(mid),
                 "is_partial": _is_partial(mid),
+                **meta,
             })
             if len(models) >= req.limit:
                 break
@@ -622,6 +698,8 @@ async def list_local_models():
         if d.is_dir():
             model_id = d.name.replace("--", "/", 1)
             key = d.name
+            config = _read_local_config(d)
+            meta = _extract_model_meta(model_id, config=config)
             with _model_lock:
                 is_loaded = key in _loaded_models
             size = _dir_size_gb(d)
@@ -639,6 +717,7 @@ async def list_local_models():
                 "is_complete": is_complete,
                 "is_partial": not is_complete and any(d.iterdir()),
                 "is_downloading": is_loading_now,
+                **meta,
             })
     return {"models": local}
 
@@ -755,7 +834,10 @@ async def load_model(req: LoadModelRequest):
                 import torch
                 import gc
                 del old_data["model"]
-                del old_data["tokenizer"]
+                if "tokenizer" in old_data:
+                    del old_data["tokenizer"]
+                if "processor" in old_data:
+                    del old_data["processor"]
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 gc.collect()
@@ -783,6 +865,8 @@ async def unload_model(model_id: str):
             del data["model"]
         if "tokenizer" in data:
             del data["tokenizer"]
+        if "processor" in data:
+            del data["processor"]
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
@@ -867,35 +951,66 @@ async def stream_local(req: ChatRequest) -> AsyncGenerator[str, None]:
     try:
         from transformers import TextIteratorStreamer
         import threading
+        from PIL import Image
 
         tokenizer = model_data["tokenizer"]
+        processor = model_data.get("processor")
         model = model_data["model"]
+        supports_vision = bool(model_data.get("supports_vision"))
+        image = None
+
+        if req.image_base64:
+            if not supports_vision:
+                yield f"data: {json.dumps({'error': 'El modelo local cargado es solo texto y no acepta imágenes.'})}\n\n"
+                return
+            image_bytes = base64.b64decode(req.image_base64)
+            image = Image.open(BytesIO(image_bytes)).convert("RGB")
 
         # Construir prompt con chat template si está disponible
         messages = []
         if req.system_prompt:
             messages.append({"role": "system", "content": req.system_prompt})
-        for msg in req.messages:
-            messages.append({"role": msg.role, "content": msg.content})
+        user_messages = list(req.messages)
+        for idx, msg in enumerate(user_messages):
+            is_last_user_with_image = image is not None and idx == len(user_messages) - 1 and msg.role == "user"
+            if is_last_user_with_image:
+                messages.append({
+                    "role": msg.role,
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": msg.content or "Describí la imagen."},
+                    ],
+                })
+            else:
+                messages.append({"role": msg.role, "content": msg.content})
 
         try:
-            input_text = tokenizer.apply_chat_template(
+            template_engine = processor if supports_vision and processor is not None else tokenizer
+            input_text = template_engine.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
             )
         except Exception:
-            # Fallback: formato simple
             parts = []
             if req.system_prompt:
                 parts.append(f"[SYSTEM] {req.system_prompt}")
-            for msg in messages:
-                role = "Usuario" if msg["role"] == "user" else "Asistente"
-                parts.append(f"{role}: {msg['content']}")
+            for msg in req.messages:
+                role = "Usuario" if msg.role == "user" else "Asistente"
+                prefix = "[Imagen] " if image is not None and msg == req.messages[-1] and msg.role == "user" else ""
+                parts.append(f"{role}: {prefix}{msg.content}")
             parts.append("Asistente:")
             input_text = "\n".join(parts)
 
-        inputs = tokenizer(input_text, return_tensors="pt")
+        if supports_vision and processor is not None and image is not None:
+            inputs = processor(
+                images=image,
+                text=input_text,
+                return_tensors="pt",
+            )
+        else:
+            inputs = tokenizer(input_text, return_tensors="pt")
+
         # mover al mismo device del modelo
         try:
             device = next(model.parameters()).device
@@ -917,7 +1032,7 @@ async def stream_local(req: ChatRequest) -> AsyncGenerator[str, None]:
             "top_p": req.top_p,
             "repetition_penalty": req.repetition_penalty,
             "do_sample": req.temperature > 0.01,
-            "pad_token_id": tokenizer.eos_token_id,
+            "pad_token_id": (tokenizer.eos_token_id if tokenizer and tokenizer.eos_token_id is not None else model.generation_config.pad_token_id),
         }
 
         # Generar en un hilo separado
@@ -1128,5 +1243,6 @@ async def serve_frontend():
 
 if __name__ == "__main__":
     import uvicorn
+    host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True, reload_excludes=["models_cache", "venv"])
+    uvicorn.run("main:app", host=host, port=port, reload=True, reload_excludes=["models_cache", "venv"])

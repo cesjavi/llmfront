@@ -15,6 +15,7 @@ const state = {
   mode: 'api',              // 'api' | 'local'
   loadedLocalModel: null,   // {id, quantization}
   quantization: 'none',
+  pendingImage: null,       // {name, mimeType, dataUrl, base64}
 
   config: {
     systemPrompt: 'Eres un asistente útil, amable y preciso. Respondes siempre en el idioma del usuario.',
@@ -36,6 +37,7 @@ let systemRAMAvailable = 0;
 document.addEventListener('DOMContentLoaded', () => {
   loadFromStorage();
   setupTextarea();
+  setupImageInput();
   loadFeaturedModels();
   syncConfigUI();
   updateFooter();
@@ -85,6 +87,10 @@ function updateStats() {
 function formatNumber(n) {
   if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
   return n;
+}
+
+function isVisionCapableModel(model) {
+  return !!(model && model.supports_vision);
 }
 
 // ══════════════════════════════════════════════════════
@@ -172,6 +178,7 @@ function updateModeUI() {
   }
 
   document.getElementById('footerMode').textContent = isLocal ? 'Local 💻' : 'API ☁️';
+  refreshVisionUI();
 }
 
 // ══════════════════════════════════════════════════════
@@ -273,11 +280,11 @@ async function loadLocalModels() {
           <button class="local-action-btn delete" onclick="deleteLocalModel('${m.id}')" title="Eliminar archivos parciales">🗑️</button>`;
       } else if (isLoaded) {
         icon = '🟢'; badge = '<span class="local-badge loaded">CARGADO</span>';
-        actions = `<button class="local-action-btn use" onclick="useLocalModelById('${m.id}')">✅ Usar</button>
+        actions = `<button class="local-action-btn use" onclick='useLocalModelById(${JSON.stringify(m)})'>✅ Usar</button>
                    <button class="local-action-btn delete" onclick="deleteLocalModel('${m.id}')">🗑️</button>`;
       } else {
         icon = '💿'; badge = '<span class="local-badge downloaded">LOCAL</span>';
-        actions = `<button class="local-action-btn load" onclick="openLoadModal('${m.id}')">🧠 Cargar</button>
+        actions = `<button class="local-action-btn load" onclick='openLoadModal(${JSON.stringify(m)})'>🧠 Cargar</button>
                    <button class="local-action-btn delete" onclick="deleteLocalModel('${m.id}')">🗑️</button>`;
       }
 
@@ -325,16 +332,24 @@ async function deleteLocalModel(modelId) {
   }
 }
 
-function openLoadModal(modelId) {
+function openLoadModal(modelOrId) {
   // Open download modal showing load section
-  const m = { id: modelId, name: modelId.split('/').pop() };
+  const m = typeof modelOrId === 'string'
+    ? { id: modelOrId, name: modelOrId.split('/').pop() }
+    : modelOrId;
   pendingModelData = m;
   openDownloadModal(m, true);
 }
 
-function useLocalModelById(modelId) {
-  state.loadedLocalModel = { id: modelId };
-  state.selectedModel = { id: modelId, name: modelId.split('/').pop() };
+function useLocalModelById(model) {
+  const modelId = typeof model === 'string' ? model : model.id;
+  const supportsVision = typeof model === 'object' ? !!model.supports_vision : (state.selectedModel?.id === modelId ? !!state.selectedModel.supports_vision : false);
+  state.loadedLocalModel = { id: modelId, supports_vision: supportsVision };
+  state.selectedModel = {
+    id: modelId,
+    name: typeof model === 'object' ? model.name : modelId.split('/').pop(),
+    supports_vision: supportsVision,
+  };
   setMode('local');
   updateModelDisplay();
   saveToStorage();
@@ -375,11 +390,14 @@ function renderModels(container, models, context = 'api') {
     const isDownloaded = m.is_downloaded || false;
     const isPartial = m.is_partial || false;
     const sizeTag = m.size_gb ? `<span class="model-size-tag">~${m.size_gb} GB</span>` : '';
+    const capabilityBadge = m.supports_vision
+      ? '<span class="capability-badge vision">VISION</span>'
+      : '<span class="capability-badge text">TEXTO</span>';
 
     const dlBtn = context === 'local'
       ? `<div class="model-item-download">
           <button class="model-dl-btn ${isDownloaded ? 'downloaded' : ''} ${isPartial ? 'partial' : ''}"
-            onclick='event.stopPropagation(); ${isDownloaded ? `openLoadModal("${m.id}")` : (isPartial ? `resumeDownload("${m.id}", "${m.name}")` : `openDownloadModal(${JSON.stringify(m)}, false)`)}'>
+            onclick='event.stopPropagation(); ${isDownloaded ? `openLoadModal(${JSON.stringify(m)})` : (isPartial ? `resumeDownload("${m.id}", "${m.name}")` : `openDownloadModal(${JSON.stringify(m)}, false)`)}'>
             ${isDownloaded ? '✅ Cargar en memoria' : (isPartial ? '🔄 Reanudar descarga' : '📥 Descargar local')}
           </button>
           ${sizeTag}
@@ -394,6 +412,7 @@ function renderModels(container, models, context = 'api') {
           <div>
             <div class="model-item-name">
               ${m.name || m.id.split('/').pop()}
+              ${capabilityBadge}
               ${isDownloaded ? '<span class="local-badge downloaded" style="margin-left:4px">LOCAL</span>' : ''}
               ${isPartial ? '<span class="local-badge downloaded" style="margin-left:4px; background:rgba(255,157,0,.15); color:#ff9d00">PARCIAL</span>' : ''}
             </div>
@@ -461,6 +480,9 @@ function openModelModal(model) {
   document.getElementById('modalModelTags').innerHTML = (model.tags || []).slice(0, 6)
     .map(t => `<span class="model-tag">${t}</span>`).join('');
   document.getElementById('modalModelDesc').textContent = model.description || 'Sin descripción disponible.';
+  document.getElementById('modalModelCapability').textContent = model.supports_vision
+    ? 'Vision + texto en modo local.'
+    : 'Modelo de texto.';
 
   // Show size if available
   const dlBtn = document.getElementById('modalDownloadBtn');
@@ -503,6 +525,23 @@ function updateModelDisplay() {
   document.querySelectorAll('.model-item').forEach(el => {
     el.classList.toggle('selected', el.dataset.modelId === m.id);
   });
+  refreshVisionUI();
+}
+
+function refreshVisionUI() {
+  const activeModel = state.mode === 'local' ? state.loadedLocalModel || state.selectedModel : state.selectedModel;
+  const isVision = state.mode === 'local' && isVisionCapableModel(activeModel);
+  const attachBtn = document.getElementById('attachImageBtn');
+  const hint = document.getElementById('visionHint');
+  const ta = document.getElementById('userInput');
+  if (attachBtn) attachBtn.style.display = isVision ? 'inline-flex' : 'none';
+  if (hint) hint.style.display = isVision ? 'block' : 'none';
+  if (ta) {
+    ta.placeholder = isVision
+      ? 'Escribí una pregunta sobre la imagen o enviá solo la imagen...'
+      : 'Escribí un mensaje... (Shift+Enter para nueva línea)';
+  }
+  if (!isVision && state.pendingImage) clearPendingImage();
 }
 
 document.getElementById('changeModelBtn').onclick = () => switchView('models');
@@ -769,7 +808,11 @@ function startProgressStream(modelId) {
       document.getElementById('dlLoadMsg').textContent = ld.message || '✓ Modelo cargado';
       document.getElementById('dlLoadBtn').style.display = 'none';
       document.getElementById('dlUseBtn').style.display = '';
-      state.loadedLocalModel = { id: modelId, quantization: state.quantization };
+      state.loadedLocalModel = {
+        id: modelId,
+        quantization: state.quantization,
+        supports_vision: pendingModelData?.supports_vision || false,
+      };
       updateModeUI();
       loadLocalModels();
       showToast('✓ Modelo listo para usar', 'success', 5000);
@@ -838,7 +881,10 @@ async function loadLocalModel() {
     const d = await r.json();
     if (d.status === 'already_loaded') {
       showToast('Modelo ya está en memoria', 'info');
-      state.loadedLocalModel = { id: pendingModelData.id };
+      state.loadedLocalModel = {
+        id: pendingModelData.id,
+        supports_vision: pendingModelData?.supports_vision || false,
+      };
       document.getElementById('dlLoadBtn').style.display = 'none';
       document.getElementById('dlUseBtn').style.display = '';
       return;
@@ -856,7 +902,11 @@ async function loadLocalModel() {
 function useLocalModel() {
   if (!pendingModelData) return;
   state.selectedModel = pendingModelData;
-  state.loadedLocalModel = { id: pendingModelData.id, quantization: state.quantization };
+  state.loadedLocalModel = {
+    id: pendingModelData.id,
+    quantization: state.quantization,
+    supports_vision: pendingModelData.supports_vision || false,
+  };
   setMode('local');
   updateModelDisplay();
   saveToStorage();
@@ -886,24 +936,93 @@ function setupTextarea() {
   });
 }
 
+function setupImageInput() {
+  const input = document.getElementById('imageInput');
+  if (!input) return;
+  input.addEventListener('change', async e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      showToast('Solo se admiten imágenes.', 'error');
+      input.value = '';
+      return;
+    }
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    const [prefix, base64] = String(dataUrl).split(',', 2);
+    state.pendingImage = {
+      name: file.name,
+      mimeType: file.type,
+      dataUrl: String(dataUrl),
+      base64,
+    };
+    input.value = '';
+    renderPendingImage();
+    updateSendButton();
+  });
+}
+
+function triggerImagePicker() {
+  const model = state.mode === 'local' ? state.loadedLocalModel || state.selectedModel : state.selectedModel;
+  if (!isVisionCapableModel(model)) {
+    showToast('Cargá un modelo local vision + texto para adjuntar imágenes.', 'info');
+    return;
+  }
+  document.getElementById('imageInput').click();
+}
+
+function clearPendingImage() {
+  state.pendingImage = null;
+  renderPendingImage();
+  updateSendButton();
+}
+
+function renderPendingImage() {
+  const tray = document.getElementById('imageAttachment');
+  if (!tray) return;
+  if (!state.pendingImage) {
+    tray.style.display = 'none';
+    tray.innerHTML = '';
+    return;
+  }
+  tray.style.display = 'flex';
+  tray.innerHTML = `
+    <img src="${state.pendingImage.dataUrl}" alt="Imagen adjunta" class="image-attachment-preview" />
+    <div class="image-attachment-meta">
+      <strong>${state.pendingImage.name}</strong>
+      <span>Se enviará con el próximo mensaje local.</span>
+    </div>
+    <button class="image-attachment-remove" onclick="clearPendingImage()" title="Quitar imagen">Quitar</button>
+  `;
+}
+
 function updateSendButton() {
   const ta = document.getElementById('userInput');
   const btn = document.getElementById('sendBtn');
   const hasModel = !!state.selectedModel;
   const hasText = !!ta.value.trim();
   const localOk = state.mode !== 'local' || !!state.loadedLocalModel;
-  btn.disabled = !hasModel || !hasText || state.isStreaming || !localOk;
+  const activeModel = state.mode === 'local' ? state.loadedLocalModel || state.selectedModel : state.selectedModel;
+  const canSendImageOnly = state.mode === 'local' && isVisionCapableModel(activeModel) && !!state.pendingImage;
+  btn.disabled = !hasModel || (!hasText && !canSendImageOnly) || state.isStreaming || !localOk;
 }
 
 async function sendMessage() {
   const ta = document.getElementById('userInput');
   const text = ta.value.trim();
-  if (!text || !state.selectedModel || state.isStreaming) return;
+  const pendingImage = state.pendingImage;
+  const activeModel = state.mode === 'local' ? state.loadedLocalModel || state.selectedModel : state.selectedModel;
+  const canSendImageOnly = state.mode === 'local' && isVisionCapableModel(activeModel) && !!pendingImage;
+  if ((!text && !canSendImageOnly) || !state.selectedModel || state.isStreaming) return;
 
   document.getElementById('welcomeScreen')?.remove();
-  addMessage('user', text);
-  state.messages.push({ role: 'user', content: text });
-  state.totalTokensEst += estimateTokens(text);
+  addMessage('user', text || 'Imagen adjunta', { imageDataUrl: pendingImage?.dataUrl });
+  state.messages.push({ role: 'user', content: text || '' });
+  state.totalTokensEst += estimateTokens(text || 'Imagen adjunta');
   ta.value = '';
   ta.style.height = 'auto';
   document.getElementById('charCount').textContent = '0 / 8000';
@@ -913,7 +1032,7 @@ async function sendMessage() {
   await streamResponse();
 }
 
-function addMessage(role, content) {
+function addMessage(role, content, options = {}) {
   const msgs = document.getElementById('messages');
   const div = document.createElement('div');
   div.className = `message ${role}`;
@@ -925,7 +1044,15 @@ function addMessage(role, content) {
       <div class="msg-time">${timeNow()}</div>
     </div>
   `;
-  div.querySelector('[data-content]').innerHTML = formatMessageContent(content);
+  const contentEl = div.querySelector('[data-content]');
+  if (options.imageDataUrl) {
+    contentEl.innerHTML = `<img src="${options.imageDataUrl}" alt="Imagen adjunta" class="chat-image-preview" />`;
+    if (content) {
+      contentEl.innerHTML += formatMessageContent(content);
+    }
+  } else {
+    contentEl.innerHTML = formatMessageContent(content);
+  }
   msgs.appendChild(div);
   scrollToBottom();
   return div;
@@ -1010,6 +1137,9 @@ async function streamResponse() {
 function buildPayload() {
   const cfg = state.config;
   const useLocal = state.mode === 'local' && !!state.loadedLocalModel;
+  const payloadImage = state.pendingImage;
+  state.pendingImage = null;
+  renderPendingImage();
   return {
     model: useLocal ? state.loadedLocalModel.id : state.selectedModel.id,
     messages: state.messages.filter(m => m.role !== 'system'),
@@ -1021,13 +1151,17 @@ function buildPayload() {
     stream: true,
     hf_token: state.hfToken || undefined,
     use_local: useLocal,
+    image_base64: useLocal ? payloadImage?.base64 : undefined,
+    image_mime_type: useLocal ? payloadImage?.mimeType : undefined,
   };
 }
 
 function clearChat() {
   state.messages = [];
   state.totalTokensEst = 0;
+  state.pendingImage = null;
   updateStats();
+  renderPendingImage();
   const msgs = document.getElementById('messages');
   msgs.innerHTML = `
     <div class="welcome-screen" id="welcomeScreen">

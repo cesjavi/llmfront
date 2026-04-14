@@ -416,6 +416,14 @@ body {
   margin: 8px 0;
 }
 .msg-bubble pre code { background: none; padding: 0; }
+.chat-image-preview {
+  display: block;
+  max-width: 220px;
+  max-height: 220px;
+  border-radius: 8px;
+  margin-bottom: 10px;
+  object-fit: cover;
+}
 
 .msg-time {
   font-size: 10px;
@@ -469,6 +477,50 @@ body {
 .input-row { display: flex; gap: 10px; align-items: flex-end; max-width: 780px; margin: 0 auto; }
 .textarea-wrap { flex: 1; position: relative; }
 
+.image-attachment {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 10px;
+  background: rgba(108,135,255,0.08);
+  border: 1px solid rgba(108,135,255,0.2);
+  border-radius: var(--radius-sm);
+}
+.image-attachment-preview {
+  width: 52px;
+  height: 52px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+.image-attachment-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.image-attachment-meta strong {
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.image-attachment-meta span {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.image-attachment-remove {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: 6px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
 textarea#userInput {
   width: 100%;
   background: var(--bg-elevated);
@@ -488,6 +540,27 @@ textarea#userInput {
 textarea#userInput:focus { border-color: var(--border-active); }
 textarea#userInput::placeholder { color: var(--text-muted); }
 
+.attach-btn,
+.send-btn {
+  width: 44px;
+  height: 44px;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.attach-btn {
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--accent-blue);
+  border: 1px solid rgba(108,135,255,0.25);
+}
+.attach-btn:hover { background: rgba(108,135,255,0.12); }
+
 .input-meta {
   position: absolute;
   bottom: 8px;
@@ -498,24 +571,22 @@ textarea#userInput::placeholder { color: var(--text-muted); }
 }
 
 .send-btn {
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
-  border: none;
+  border-radius: 8px;
   background: linear-gradient(135deg, var(--accent-hf), #ffaa33);
   color: #000;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s;
-  flex-shrink: 0;
   box-shadow: 0 4px 16px rgba(255,157,0,0.3);
 }
 .send-btn:hover:not(:disabled) { transform: scale(1.06); box-shadow: var(--shadow-glow); }
 .send-btn:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: none; transform: none; }
 .send-btn.loading { animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 0.7; } 50% { opacity: 1; } }
+
+.vision-hint {
+  max-width: 780px;
+  margin: 8px auto 0;
+  font-size: 11px;
+  color: #8eb6ff;
+}
 
 .input-footer {
   display: flex;
@@ -818,6 +889,26 @@ textarea#userInput::placeholder { color: var(--text-muted); }
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
+.capability-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  vertical-align: middle;
+}
+.capability-badge.text {
+  background: rgba(108,135,255,0.12);
+  border: 1px solid rgba(108,135,255,0.24);
+  color: #88a8ff;
+}
+.capability-badge.vision {
+  background: rgba(74,222,128,0.12);
+  border: 1px solid rgba(74,222,128,0.24);
+  color: #7fe4a2;
+}
 .model-item-id {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
@@ -925,6 +1016,11 @@ textarea#userInput::placeholder { color: var(--text-muted); }
   word-break: break-all;
 }
 .modal-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 12px; }
+.modal-capability {
+  font-size: 12px;
+  color: #8eb6ff;
+  margin-bottom: 10px;
+}
 .modal-desc { font-size: 13px; color: var(--text-secondary); line-height: 1.6; margin-bottom: 20px; }
 .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
 
