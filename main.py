@@ -25,6 +25,10 @@ from pydantic import BaseModel
 from huggingface_hub import InferenceClient, snapshot_download
 import requests
 
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
@@ -352,11 +356,24 @@ def _load_model_thread(model_id: str, quantization: str, device: str):
 
         # HF Transformers / PyTorch
         import torch
-        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor, AutoTokenizer
+        try:
+            from transformers import AutoModelForImageTextToText
+        except ImportError:
+            AutoModelForImageTextToText = None
 
         config = AutoConfig.from_pretrained(str(local_dir), trust_remote_code=True)
         model_meta = _extract_model_meta(model_id, config=config.to_dict())
         supports_vision = model_meta["supports_vision"]
+        if supports_vision and AutoModelForImageTextToText is None:
+            logger.warning(
+                "Installed transformers does not provide AutoModelForImageTextToText; "
+                "falling back to text-only loading for %s",
+                model_id,
+            )
+            supports_vision = False
+            model_meta["supports_vision"] = False
+            model_meta["capability_label"] = "Solo texto"
 
         # Detectar device disponible respetando la preferencia del usuario
         use_cuda = torch.cuda.is_available() and device != "cpu"
@@ -366,6 +383,11 @@ def _load_model_thread(model_id: str, quantization: str, device: str):
         else:
             target_device = torch.device("cpu")
             dtype = torch.float32
+            try:
+                import transformers.utils.import_utils as _tf_import_utils
+                _tf_import_utils._bitsandbytes_available = False
+            except Exception:
+                pass
 
         # --- Hardware safety check ---
         sys_info = _system_info()

@@ -2,6 +2,7 @@
 let state = {
     view: 'chat',
     modelsTab: 'cloud',
+    featuredModels: [],
     activeModel: null, // {id, name, isLocal, supportsVision}
     isLocal: false,
     messages: [],
@@ -16,6 +17,9 @@ let state = {
 // ─── INIT ───
 document.addEventListener('DOMContentLoaded', () => {
     if (state.hfToken) document.getElementById('hfTokenInput').value = state.hfToken;
+    document.getElementById('saveTokenBtn').addEventListener('click', saveHfToken);
+    document.getElementById('changeModelBtn').addEventListener('click', () => switchView('models'));
+    document.getElementById('newChatBtn').addEventListener('click', clearChat);
     loadFeaturedModels();
     updateHardwareInfo();
     setInterval(updateHardwareInfo, 10000);
@@ -100,30 +104,57 @@ async function sendMessage() {
         }
 
         const reader = response.body.getReader();
-        const decoder = new TextDecoder();
+        const decoder = new TextDecoder('utf-8');
         let aiFullText = "";
+        let sseBuffer = "";
         aiMsg.thinking = false;
 
         while (true) {
             const { done, value } = await reader.read();
-            if (done) break;
+            if (done) {
+                sseBuffer += decoder.decode();
+                break;
+            }
             
-            const chunk = decoder.decode(value);
-            const lines = chunk.split('\n');
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
+            sseBuffer += decoder.decode(value, { stream: true });
+            const events = sseBuffer.split('\n\n');
+            sseBuffer = events.pop() || "";
+
+            for (const event of events) {
+                for (const line of event.split('\n')) {
+                    if (!line.startsWith('data: ')) continue;
+                    let data;
                     try {
-                        const data = JSON.parse(line.substring(6));
-                        if (data.token) {
-                            aiFullText += data.token;
-                            aiMsg.content = aiFullText;
-                            renderMessages();
-                            scroll();
-                        }
-                        if (data.error) throw new Error(data.error);
+                        data = JSON.parse(line.substring(6));
                     } catch (e) { console.error("JSON parse error", e); }
+                    if (!data) continue;
+                    if (data.error) throw new Error(data.error);
+                    if (data.token) {
+                        aiFullText += data.token;
+                        aiMsg.content = aiFullText;
+                        renderMessages();
+                        scroll();
+                    }
                 }
             }
+        }
+
+        if (sseBuffer.trim()) {
+            for (const line of sseBuffer.split('\n')) {
+                if (!line.startsWith('data: ')) continue;
+                let data;
+                try {
+                    data = JSON.parse(line.substring(6));
+                } catch (e) { console.error("JSON parse error", e); }
+                if (!data) continue;
+                if (data.error) throw new Error(data.error);
+                if (data.token) {
+                    aiFullText += data.token;
+                    aiMsg.content = aiFullText;
+                }
+            }
+            renderMessages();
+            scroll();
         }
     } catch (err) {
         aiMsg.content = `❌ Error: ${err.message}`;
@@ -138,13 +169,14 @@ function renderMessages() {
     container.innerHTML = '';
     
     if (state.messages.length === 0) {
-        container.appendChild(document.getElementById('welcomeScreen'));
+        container.innerHTML = getWelcomeHtml();
         return;
     }
 
     state.messages.forEach((msg, idx) => {
         const div = document.createElement('div');
-        div.className = `message ${msg.role === 'user' ? 'user-msg' : 'ai-msg'}`;
+        const isUser = msg.role === 'user';
+        div.className = `message ${isUser ? 'user' : 'assistant'}`;
         
         let contentHtml = '';
         if (msg.images && msg.images.length > 0) {
@@ -158,21 +190,44 @@ function renderMessages() {
         const text = msg.content || '';
         const mdText = msg.thinking ? '<span class="thinking-dots"><span>.</span><span>.</span><span>.</span></span>' : formatMarkdown(text);
         
-        contentHtml += `<div class="msg-text">${mdText}</div>`;
-        div.innerHTML = contentHtml;
+        contentHtml += `<div class="msg-bubble">${mdText}</div>`;
+        div.innerHTML = `
+            <div class="msg-avatar">${isUser ? 'Tu' : 'AI'}</div>
+            <div class="msg-content">${contentHtml}</div>
+        `;
         container.appendChild(div);
     });
 }
 
 function formatMarkdown(text) {
-    // Basic formatting for demo
-    return text
+    const escaped = text
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
+        .replace(/>/g, '&gt;');
+
+    return escaped
         .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
         .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/^\s*[-*]\s+(.+)$/gm, '<span class="md-list-item">$1</span>')
+        .replace(/^\s*(\d+)\.\s+(.+)$/gm, '<strong>$1.</strong> $2')
         .replace(/\n/g, '<br/>');
+}
+
+function getWelcomeHtml() {
+    return `
+        <div class="welcome-screen" id="welcomeScreen">
+          <div class="welcome-icon">ðŸ¤—</div>
+          <h1 class="welcome-title">LLMFront</h1>
+          <p class="welcome-sub">Chat con cualquier modelo de Hugging Face</p>
+          <div class="welcome-steps">
+            <div class="step"><span class="step-num">1</span><span>IngresÃ¡ tu <strong>HF Token</strong> en la barra lateral</span></div>
+            <div class="step"><span class="step-num">2</span><span>SeleccionÃ¡ un <strong>modelo</strong> en la secciÃ³n Modelos</span></div>
+            <div class="step"><span class="step-num">3</span><span>ConfigurÃ¡ el <strong>contexto</strong> y parÃ¡metros a tu gusto</span></div>
+            <div class="step"><span class="step-num">4</span><span>Â¡EmpezÃ¡ a <strong>chatear</strong>!</span></div>
+          </div>
+        </div>
+    `;
 }
 
 // ─── VISION & CAMERA ───
@@ -283,6 +338,21 @@ function switchView(view) {
     document.getElementById(`nav${view.charAt(0).toUpperCase() + view.slice(1)}`).classList.add('active');
 }
 
+function switchModelsTab(tab) {
+    state.modelsTab = tab;
+    document.getElementById('tabCloud').classList.toggle('active', tab === 'cloud');
+    document.getElementById('tabLocal').classList.toggle('active', tab === 'local');
+    document.getElementById('tabContentCloud').style.display = tab === 'cloud' ? 'block' : 'none';
+    document.getElementById('tabContentLocal').style.display = tab === 'local' ? 'block' : 'none';
+
+    if (tab === 'local') {
+        if (state.featuredModels.length > 0) {
+            renderModels(state.featuredModels, 'downloadModelsGrid');
+        }
+        loadLocalModels();
+    }
+}
+
 function setMode(mode) {
     state.isLocal = (mode === 'local');
     document.getElementById('modeApiBtn').classList.toggle('active', mode === 'api');
@@ -290,6 +360,51 @@ function setMode(mode) {
     
     document.getElementById('footerMode').innerText = mode === 'api' ? 'API ☁️' : 'Local 💻';
     updateVisionSupport();
+}
+
+function updateModeUI() {
+    setMode(state.isLocal ? 'local' : 'api');
+}
+
+function saveHfToken() {
+    state.hfToken = document.getElementById('hfTokenInput').value.trim();
+    localStorage.setItem('hf_token', state.hfToken);
+    showToast(state.hfToken ? "HF Token guardado" : "HF Token eliminado", "success");
+}
+
+function updateSlider(inputId, valueId, value, formatFn) {
+    document.getElementById(valueId).innerText = formatFn(value);
+    if (inputId === 'maxNewTokens') document.getElementById('footerTokens').innerText = value;
+    if (inputId === 'temperature') document.getElementById('footerTemp').innerText = value;
+}
+
+function applyPreset(preset) {
+    const presets = {
+        precise: { temperature: 0.2, topP: 0.8, repPenalty: 1.15 },
+        balanced: { temperature: 0.7, topP: 0.9, repPenalty: 1.1 },
+        creative: { temperature: 1.1, topP: 0.95, repPenalty: 1.05 },
+        code: { temperature: 0.3, topP: 0.85, repPenalty: 1.12 }
+    };
+    const cfg = presets[preset] || presets.balanced;
+    setConfigValue('temperature', 'tempValue', cfg.temperature);
+    setConfigValue('topP', 'topPValue', cfg.topP);
+    setConfigValue('repPenalty', 'repPenValue', cfg.repPenalty);
+    showToast("Preset aplicado", "success");
+}
+
+function resetConfig() {
+    setConfigValue('temperature', 'tempValue', 0.7);
+    setConfigValue('maxNewTokens', 'maxTokensValue', 512);
+    setConfigValue('topP', 'topPValue', 0.9);
+    setConfigValue('repPenalty', 'repPenValue', 1.1);
+    document.getElementById('streamToggle').checked = true;
+    document.getElementById('systemPrompt').value = "Eres un asistente útil, amable y preciso. Respondes siempre en el idioma del usuario.";
+    showToast("Configuración restaurada", "success");
+}
+
+function setConfigValue(inputId, valueId, value) {
+    document.getElementById(inputId).value = value;
+    updateSlider(inputId, valueId, String(value), v => v);
 }
 
 function updateSendButton() {
@@ -322,7 +437,9 @@ async function loadFeaturedModels() {
     try {
         const res = await fetch('/models/featured');
         const data = await res.json();
-        renderModels(data.models, 'featuredModelsGrid');
+        state.featuredModels = data.models || [];
+        renderModels(state.featuredModels, 'featuredModelsGrid');
+        renderModels(state.featuredModels, 'downloadModelsGrid');
         if (state.modelsTab === 'local') loadLocalModels();
     } catch (e) { console.error(e); }
 }
@@ -335,15 +452,53 @@ async function loadLocalModels() {
     } catch (e) { console.error(e); }
 }
 
+function renderLocalModelsList(data) {
+    const models = data.models || [];
+    const list = document.getElementById('localModelsList');
+    const count = document.getElementById('hwModels');
+    if (count) count.innerText = `📦 Descargados: ${models.length}`;
+
+    if (models.length === 0) {
+        list.innerHTML = '<div class="local-empty">No hay modelos descargados aún.<br>Seleccioná un modelo de la lista de destacados y hacé clic en <strong>📥 Descargar local</strong>.</div>';
+        return;
+    }
+
+    list.innerHTML = '';
+    models.forEach(m => {
+        const card = document.createElement('div');
+        card.className = `local-model-card ${m.is_loaded ? 'is-loaded' : ''} ${m.is_partial ? 'is-partial' : ''}`;
+        card.innerHTML = `
+            <div class="local-model-icon">💻</div>
+            <div class="local-model-info">
+                <div class="local-model-name">${m.name}</div>
+                <div class="local-model-meta">
+                    ${m.id} · ${m.size_gb || 0} GB
+                    <span class="local-badge ${m.is_loaded ? 'loaded' : 'downloaded'}">${m.is_loaded ? 'Cargado' : m.is_complete ? 'Listo' : 'Incompleto'}</span>
+                </div>
+            </div>
+            <div class="local-model-actions">
+                <button class="local-action-btn ${m.is_loaded ? 'use' : 'load'}">${m.is_loaded ? 'Usar' : 'Cargar'}</button>
+            </div>
+        `;
+        card.querySelector('button').onclick = () => {
+            currentModalModel = m;
+            openDownloadModal(m);
+            showLoadStep(m);
+        };
+        list.appendChild(card);
+    });
+}
+
 function renderModels(models, gridId) {
     const grid = document.getElementById(gridId);
     grid.innerHTML = '';
     models.forEach(m => {
         const card = document.createElement('div');
-        card.className = `model-card-item ${state.activeModel?.id === m.id ? 'active' : ''}`;
+        const tags = Array.isArray(m.tags) ? m.tags : [];
+        card.className = `model-item ${state.activeModel?.id === m.id ? 'selected' : ''}`;
         card.onclick = () => showModelModal(m);
         card.innerHTML = `
-            <div class="m-header">
+            <div class="model-item-header">
                 <span class="m-icon">${m.supports_vision ? '👁️' : '📝'}</span>
                 <div class="m-info">
                    <div class="m-name">${m.name}</div>
@@ -365,6 +520,7 @@ function renderModels(models, gridId) {
 }
 
 function showModelModal(m) {
+    currentModalModel = m;
     const modal = document.getElementById('modelConfirmModal');
     document.getElementById('modalModelName').innerText = m.name;
     document.getElementById('modalModelId').innerText = m.id;
@@ -414,6 +570,20 @@ function setActiveModel(m, isLocal) {
 
 function closeModal() {
     document.querySelectorAll('.modal-overlay').forEach(m => m.style.display = 'none');
+}
+
+function confirmModelSelect() {
+    if (!currentModalModel) return;
+    setActiveModel(currentModalModel, false);
+    closeModal();
+    switchView('chat');
+}
+
+function startDownloadFromModal() {
+    if (!currentModalModel) return;
+    closeModal();
+    openDownloadModal(currentModalModel);
+    if (currentModalModel.is_downloaded) showLoadStep(currentModalModel);
 }
 
 // ─── TOAST & UTILS ───
@@ -495,6 +665,17 @@ function openDownloadModal(m) {
     document.getElementById('dlModalActionsLoad').style.display = 'none';
     
     modal.style.display = 'flex';
+}
+
+function showLoadStep(m) {
+    document.getElementById('dlModalTitle').innerText = "Cargar modelo en memoria";
+    document.getElementById('dlSectionDownload').style.display = 'none';
+    document.getElementById('dlSectionLoad').style.display = 'block';
+    document.getElementById('dlModalActions').style.display = 'none';
+    document.getElementById('dlModalActionsLoad').style.display = 'flex';
+    document.getElementById('dlLoadMsg').innerText = m.is_loaded ? "Modelo cargado. Podés usarlo en el chat." : "Listo para cargar.";
+    document.getElementById('dlLoadPct').innerText = m.is_loaded ? "100%" : "0%";
+    document.getElementById('dlLoadBar').style.width = m.is_loaded ? "100%" : "0%";
 }
 
 function setQuant(q) {

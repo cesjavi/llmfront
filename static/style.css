@@ -416,6 +416,17 @@ body {
   margin: 8px 0;
 }
 .msg-bubble pre code { background: none; padding: 0; }
+.md-list-item {
+  display: block;
+  padding-left: 1.1em;
+  position: relative;
+}
+.md-list-item::before {
+  content: "-";
+  position: absolute;
+  left: 0;
+  color: var(--text-secondary);
+}
 .chat-image-preview {
   display: block;
   max-width: 220px;
@@ -882,6 +893,17 @@ textarea#userInput::placeholder { color: var(--text-muted); }
 .model-item.selected::before { opacity: 1; }
 
 .model-item-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.m-icon { display: none; }
+.m-info {
+  min-width: 0;
+}
+.m-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: #eef2ff;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
 .model-item-name {
   font-size: 15px;
   font-weight: 700;
@@ -919,6 +941,16 @@ textarea#userInput::placeholder { color: var(--text-muted); }
   text-overflow: ellipsis;
   max-width: 240px;
 }
+.m-id {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #75809e;
+  margin-top: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 240px;
+}
 .model-likes {
   font-size: 12px;
   color: #ffb347;
@@ -939,8 +971,24 @@ textarea#userInput::placeholder { color: var(--text-muted); }
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.m-desc {
+  font-size: 13px;
+  color: #b6c0d8;
+  margin-top: 10px;
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 
 .model-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 10px;
+}
+.m-tags {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
@@ -953,6 +1001,23 @@ textarea#userInput::placeholder { color: var(--text-muted); }
   border: 1px solid rgba(255,255,255,0.08);
   border-radius: 20px;
   color: #8e9ab8;
+}
+.m-tag {
+  font-size: 11px;
+  padding: 3px 8px;
+  background: #171b28;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 20px;
+  color: #8e9ab8;
+}
+.m-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: #ffb347;
+  font-weight: 700;
 }
 
 /* Loading spinner */
