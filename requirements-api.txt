@@ -1,0 +1,13 @@
+# ─── LLMFront: Modo API (solo cloud) ──────────────────────────────────────────
+# Usa esto cuando LLMFRONT_MODE=api
+# Sin torch/transformers → ~100 MB RAM vs ~500+ MB en modo local
+#
+# pip install -r requirements-api.txt
+
+fastapi>=0.110.0
+uvicorn>=0.29.0          # sin [standard] = menos overhead
+huggingface_hub>=0.22.0
+sse-starlette>=1.8.2
+python-dotenv>=1.0.0
+requests>=2.31.0
+psutil>=5.9.0            # para /system/info

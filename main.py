@@ -1,8 +1,13 @@
 """
 LLMFront - Backend FastAPI
-Soporta dos modos:
-  1. Inference API de HuggingFace (cloud, sin descarga)
-  2. Local: descarga el modelo y corre en tu máquina con transformers
+
+Modos de operación (LLMFRONT_MODE en .env):
+  - "api"   → Solo cloud: HF Inference API + Groq. Sin torch/transformers. ~100 MB RAM.
+  - "local" → Full local: descarga modelos y corre con transformers + torch. RAM alta.
+
+Variables clave en .env:
+  LLMFRONT_MODE=api            # "api" o "local" (default: "local")
+  GROQ_AI_SEARCH_ENABLED=true  # habilita/deshabilita búsqueda IA en HF Hub
 """
 
 import os
@@ -34,9 +39,24 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ─── Configuración de modo ────────────────────────────────────────────────────
+LLMFRONT_MODE = os.getenv("LLMFRONT_MODE", "local").lower()
+LOCAL_MODE = LLMFRONT_MODE == "local"
+GROQ_AI_SEARCH_ENABLED = os.getenv("GROQ_AI_SEARCH_ENABLED", "true").lower() in ("1", "true", "yes")
+
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 MODELS_CACHE_DIR = Path("./models_cache")
-MODELS_CACHE_DIR.mkdir(exist_ok=True)
+if LOCAL_MODE:
+    MODELS_CACHE_DIR.mkdir(exist_ok=True)
+
+_mode_label = "LOCAL 🖥️  (inferencia local habilitada)" if LOCAL_MODE else "API ☁️  (solo cloud, sin torch)"
+logger.info(f"🚀 LLMFront modo: {_mode_label}")
+if GROQ_AI_SEARCH_ENABLED and os.getenv("GROQ_API_KEY", ""):
+    logger.info("🔍 Búsqueda IA (Groq): HABILITADA")
+elif GROQ_AI_SEARCH_ENABLED:
+    logger.info("⚠️  Búsqueda IA (Groq): habilitada pero sin GROQ_API_KEY")
+else:
+    logger.info("🔍 Búsqueda IA (Groq): DESHABILITADA")
 
 app = FastAPI(title="LLMFront", description="HuggingFace LLM Chat Frontend", version="2.0.0")
 
@@ -91,6 +111,7 @@ class ModelSearchRequest(BaseModel):
     use_ai_search: bool = False
     
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
 
 class DownloadRequest(BaseModel):
     model_id: str
@@ -559,7 +580,18 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "2.0.0", "local_support": True}
+    return {"status": "ok", "version": "2.0.0", "mode": LLMFRONT_MODE, "local_support": LOCAL_MODE}
+
+
+@app.get("/config")
+async def get_config():
+    """Configuración activa del servidor (modo, features habilitadas)."""
+    return {
+        "mode": LLMFRONT_MODE,
+        "local_mode": LOCAL_MODE,
+        "groq_ai_search_enabled": GROQ_AI_SEARCH_ENABLED and bool(GROQ_API_KEY),
+        "groq_available": bool(GROQ_API_KEY),
+    }
 
 
 @app.get("/system/info")
@@ -641,6 +673,9 @@ async def search_models(req: ModelSearchRequest):
     search_query = req.query
     
     # 🧠 Búsqueda Semántica Asistida por IA (Groq)
+    if req.use_ai_search and not GROQ_AI_SEARCH_ENABLED:
+        logger.info("Búsqueda IA solicitada pero GROQ_AI_SEARCH_ENABLED=false, ignorando.")
+        req = req.model_copy(update={"use_ai_search": False})
     if req.use_ai_search and GROQ_API_KEY and search_query:
         try:
             groq_prompt = (
@@ -716,69 +751,71 @@ async def search_models(req: ModelSearchRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/models/local")
-async def list_local_models():
-    """Lista todos los modelos descargados localmente."""
-    local = []
-    for d in MODELS_CACHE_DIR.iterdir():
-        if d.is_dir():
-            model_id = d.name.replace("--", "/", 1)
-            key = d.name
-            config = _read_local_config(d)
-            meta = _extract_model_meta(model_id, config=config)
-            with _model_lock:
-                is_loaded = key in _loaded_models
-            size = _dir_size_gb(d)
-            is_complete = _is_downloaded(model_id)
-            is_loading_now = False
-            with _download_lock:
-                dl_state = _download_state.get(key, {})
-                is_loading_now = dl_state.get("status") == "downloading"
-            local.append({
-                "id": model_id,
-                "name": model_id.split("/")[-1],
-                "local_dir": str(d),
-                "size_gb": size,
-                "is_loaded": is_loaded,
-                "is_complete": is_complete,
-                "is_partial": not is_complete and any(d.iterdir()),
-                "is_downloading": is_loading_now,
-                **meta,
-            })
-    return {"models": local}
+if LOCAL_MODE:
+    @app.get("/models/local")
+    async def list_local_models():
+        """Lista todos los modelos descargados localmente."""
+        local = []
+        for d in MODELS_CACHE_DIR.iterdir():
+            if d.is_dir():
+                model_id = d.name.replace("--", "/", 1)
+                key = d.name
+                config = _read_local_config(d)
+                meta = _extract_model_meta(model_id, config=config)
+                with _model_lock:
+                    is_loaded = key in _loaded_models
+                size = _dir_size_gb(d)
+                is_complete = _is_downloaded(model_id)
+                is_loading_now = False
+                with _download_lock:
+                    dl_state = _download_state.get(key, {})
+                    is_loading_now = dl_state.get("status") == "downloading"
+                local.append({
+                    "id": model_id,
+                    "name": model_id.split("/")[-1],
+                    "local_dir": str(d),
+                    "size_gb": size,
+                    "is_loaded": is_loaded,
+                    "is_complete": is_complete,
+                    "is_partial": not is_complete and any(d.iterdir()),
+                    "is_downloading": is_loading_now,
+                    **meta,
+                })
+        return {"models": local}
 
 
-@app.post("/models/download")
-async def start_download(req: DownloadRequest):
-    """Inicia (o reanuda) la descarga de un modelo en background."""
-    key = _model_key(req.model_id)
-    with _download_lock:
-        existing = _download_state.get(key, {})
-        if existing.get("status") == "downloading":
-            return {"status": "already_downloading", "message": "Ya se está descargando este modelo"}
-
-    # Detectar si hay una descarga parcial previa para informar
-    is_partial = _is_partial(req.model_id)
-    size_saved = _dir_size_gb(_model_local_dir(req.model_id)) if is_partial else 0
-    if is_partial:
-        logger.info(f"Resuming partial download: {req.model_id} ({size_saved} GB saved)")
+if LOCAL_MODE:
+    @app.post("/models/download")
+    async def start_download(req: DownloadRequest):
+        """Inicia (o reanuda) la descarga de un modelo en background."""
+        key = _model_key(req.model_id)
         with _download_lock:
-            _download_state[key] = {
-                "status": "downloading",
-                "progress": 0,
-                "message": f"Reanudando descarga ({size_saved} GB ya guardados)...",
-                "model_id": req.model_id,
-                "size_saved_gb": size_saved,
-            }
+            existing = _download_state.get(key, {})
+            if existing.get("status") == "downloading":
+                return {"status": "already_downloading", "message": "Ya se está descargando este modelo"}
 
-    token = req.hf_token or HF_TOKEN
-    t = Thread(target=_download_thread, args=(req.model_id, token), daemon=True)
-    t.start()
-    return {"status": "started" if not is_partial else "resuming", "model_id": req.model_id}
+        is_partial = _is_partial(req.model_id)
+        size_saved = _dir_size_gb(_model_local_dir(req.model_id)) if is_partial else 0
+        if is_partial:
+            logger.info(f"Resuming partial download: {req.model_id} ({size_saved} GB saved)")
+            with _download_lock:
+                _download_state[key] = {
+                    "status": "downloading",
+                    "progress": 0,
+                    "message": f"Reanudando descarga ({size_saved} GB ya guardados)...",
+                    "model_id": req.model_id,
+                    "size_saved_gb": size_saved,
+                }
+
+        token = req.hf_token or HF_TOKEN
+        t = Thread(target=_download_thread, args=(req.model_id, token), daemon=True)
+        t.start()
+        return {"status": "started" if not is_partial else "resuming", "model_id": req.model_id}
 
 
-@app.get("/models/download/{model_id:path}/progress")
-async def download_progress_sse(model_id: str):
+if LOCAL_MODE:
+  @app.get("/models/download/{model_id:path}/progress")
+  async def download_progress_sse(model_id: str):
     """SSE stream del progreso de descarga y carga."""
     async def generate():
         key = _model_key(model_id)
@@ -819,102 +856,105 @@ async def download_progress_sse(model_id: str):
     )
 
 
-@app.get("/models/download/{model_id:path}/status")
-async def download_status(model_id: str):
-    """Estado puntual de descarga/carga de un modelo."""
-    key = _model_key(model_id)
-    with _download_lock:
-        dl = dict(_download_state.get(key, {"status": "idle"}))
-    with _model_lock:
-        ld = dict(_download_state.get(key + "_load", {}))
-        is_loaded = key in _loaded_models
-    
-    local_dir = _model_local_dir(model_id)
-    if local_dir.exists() and dl.get("status") == "downloading":
-        dl["size_downloaded_gb"] = _dir_size_gb(local_dir)
+if LOCAL_MODE:
+    @app.get("/models/download/{model_id:path}/status")
+    async def download_status(model_id: str):
+        """Estado puntual de descarga/carga de un modelo."""
+        key = _model_key(model_id)
+        with _download_lock:
+            dl = dict(_download_state.get(key, {"status": "idle"}))
+        with _model_lock:
+            ld = dict(_download_state.get(key + "_load", {}))
+            is_loaded = key in _loaded_models
 
-    return {
-        "download": dl,
-        "load": ld,
-        "is_downloaded": _is_downloaded(model_id),
-        "is_loaded": is_loaded,
-    }
+        local_dir = _model_local_dir(model_id)
+        if local_dir.exists() and dl.get("status") == "downloading":
+            dl["size_downloaded_gb"] = _dir_size_gb(local_dir)
 
-
-@app.post("/models/load")
-async def load_model(req: LoadModelRequest):
-    """Carga un modelo local en memoria para inferencia."""
-    if not _is_downloaded(req.model_id):
-        raise HTTPException(status_code=404, detail="El modelo no está descargado")
-    
-    key = _model_key(req.model_id)
-    
-    with _model_lock:
-        if key in _loaded_models:
-            return {"status": "already_loaded", "message": "Modelo ya cargado"}
-        # Descargar el modelo anterior si hay uno
-        if _loaded_models:
-            old_key = next(iter(_loaded_models))
-            old_data = _loaded_models.pop(old_key)
-            try:
-                import torch
-                import gc
-                del old_data["model"]
-                if "tokenizer" in old_data:
-                    del old_data["tokenizer"]
-                if "processor" in old_data:
-                    del old_data["processor"]
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                gc.collect()
-            except Exception:
-                pass
-            logger.info(f"Unloaded previous model: {old_key}")
-
-    t = Thread(target=_load_model_thread, args=(req.model_id, req.quantization, req.device), daemon=True)
-    t.start()
-    return {"status": "loading", "model_id": req.model_id}
+        return {
+            "download": dl,
+            "load": ld,
+            "is_downloaded": _is_downloaded(model_id),
+            "is_loaded": is_loaded,
+        }
 
 
-@app.post("/models/unload")
-async def unload_model(model_id: str):
-    """Descarga el modelo de memoria RAM/VRAM."""
-    key = _model_key(model_id)
-    with _model_lock:
-        if key not in _loaded_models:
-            return {"status": "not_loaded"}
-        data = _loaded_models.pop(key)
-    try:
-        import torch
-        import gc
-        if "model" in data:
-            del data["model"]
-        if "tokenizer" in data:
-            del data["tokenizer"]
-        if "processor" in data:
-            del data["processor"]
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
-    except Exception:
-        pass
-    return {"status": "unloaded", "model_id": model_id}
+if LOCAL_MODE:
+    @app.post("/models/load")
+    async def load_model(req: LoadModelRequest):
+        """Carga un modelo local en memoria para inferencia."""
+        if not _is_downloaded(req.model_id):
+            raise HTTPException(status_code=404, detail="El modelo no está descargado")
+
+        key = _model_key(req.model_id)
+
+        with _model_lock:
+            if key in _loaded_models:
+                return {"status": "already_loaded", "message": "Modelo ya cargado"}
+            if _loaded_models:
+                old_key = next(iter(_loaded_models))
+                old_data = _loaded_models.pop(old_key)
+                try:
+                    import torch
+                    import gc
+                    del old_data["model"]
+                    if "tokenizer" in old_data:
+                        del old_data["tokenizer"]
+                    if "processor" in old_data:
+                        del old_data["processor"]
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    gc.collect()
+                except Exception:
+                    pass
+                logger.info(f"Unloaded previous model: {old_key}")
+
+        t = Thread(target=_load_model_thread, args=(req.model_id, req.quantization, req.device), daemon=True)
+        t.start()
+        return {"status": "loading", "model_id": req.model_id}
 
 
-@app.delete("/models/local/{model_id:path}")
-async def delete_local_model(model_id: str):
-    """Elimina un modelo del disco."""
-    key = _model_key(model_id)
-    with _model_lock:
-        if key in _loaded_models:
-            raise HTTPException(400, "Desactivá el modelo antes de eliminarlo")
-    local_dir = _model_local_dir(model_id)
-    if not local_dir.exists():
-        raise HTTPException(404, "Modelo no encontrado")
-    shutil.rmtree(local_dir, ignore_errors=True)
-    with _download_lock:
-        _download_state.pop(key, None)
-    return {"status": "deleted", "model_id": model_id}
+if LOCAL_MODE:
+    @app.post("/models/unload")
+    async def unload_model(model_id: str):
+        """Descarga el modelo de memoria RAM/VRAM."""
+        key = _model_key(model_id)
+        with _model_lock:
+            if key not in _loaded_models:
+                return {"status": "not_loaded"}
+            data = _loaded_models.pop(key)
+        try:
+            import torch
+            import gc
+            if "model" in data:
+                del data["model"]
+            if "tokenizer" in data:
+                del data["tokenizer"]
+            if "processor" in data:
+                del data["processor"]
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+        except Exception:
+            pass
+        return {"status": "unloaded", "model_id": model_id}
+
+
+if LOCAL_MODE:
+    @app.delete("/models/local/{model_id:path}")
+    async def delete_local_model(model_id: str):
+        """Elimina un modelo del disco."""
+        key = _model_key(model_id)
+        with _model_lock:
+            if key in _loaded_models:
+                raise HTTPException(400, "Desactivá el modelo antes de eliminarlo")
+        local_dir = _model_local_dir(model_id)
+        if not local_dir.exists():
+            raise HTTPException(404, "Modelo no encontrado")
+        shutil.rmtree(local_dir, ignore_errors=True)
+        with _download_lock:
+            _download_state.pop(key, None)
+        return {"status": "deleted", "model_id": model_id}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1100,6 +1140,14 @@ async def stream_local(req: ChatRequest) -> AsyncGenerator[str, None]:
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
     """Streaming SSE: usa modo local o API según `use_local`."""
+    if req.use_local and not LOCAL_MODE:
+        async def _mode_error():
+            yield f"data: {json.dumps({'error': 'Inferencia local deshabilitada. Configurá LLMFRONT_MODE=local para usarla.'})}\n\n"
+        return StreamingResponse(
+            _mode_error(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+        )
     generator = stream_local(req) if req.use_local else stream_hf_api(req)
     return StreamingResponse(
         generator,
@@ -1140,23 +1188,24 @@ async def chat_complete(req: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/tags")
-async def ollama_tags():
-    """Ollama API: List downloaded models"""
-    models = []
-    for d in MODELS_CACHE_DIR.iterdir():
-        if d.is_dir():
-            model_id = d.name.replace("--", "/", 1)
-            if _is_downloaded(model_id):
-                models.append({
-                    "name": model_id,
-                    "model": model_id,
-                    "modified_at": datetime.now().isoformat() + "Z",
-                    "size": int(_dir_size_gb(d) * 1e9),
-                    "digest": "",
-                    "details": {"format": "pytorch", "family": "", "parameter_size": "", "quantization_level": ""}
-                })
-    return {"models": models}
+if LOCAL_MODE:
+    @app.get("/api/tags")
+    async def ollama_tags():
+        """Ollama API: List downloaded models"""
+        models = []
+        for d in MODELS_CACHE_DIR.iterdir():
+            if d.is_dir():
+                model_id = d.name.replace("--", "/", 1)
+                if _is_downloaded(model_id):
+                    models.append({
+                        "name": model_id,
+                        "model": model_id,
+                        "modified_at": datetime.now().isoformat() + "Z",
+                        "size": int(_dir_size_gb(d) * 1e9),
+                        "digest": "",
+                        "details": {"format": "pytorch", "family": "", "parameter_size": "", "quantization_level": ""}
+                    })
+        return {"models": models}
 
 async def _ollama_stream(generator, is_chat=True, model_name=""):
     async for chunk in generator:
@@ -1203,8 +1252,9 @@ async def _ollama_stream(generator, is_chat=True, model_name=""):
                     "done": True
                 }) + "\n"
 
-@app.post("/api/chat")
-async def ollama_chat(req: OllamaChatRequest):
+if LOCAL_MODE:
+  @app.post("/api/chat")
+  async def ollama_chat(req: OllamaChatRequest):
     """Ollama API: Chat"""
     chat_req = ChatRequest(
         model=req.model,
@@ -1236,8 +1286,9 @@ async def ollama_chat(req: OllamaChatRequest):
             "done": True
         }
 
-@app.post("/api/generate")
-async def ollama_generate(req: OllamaGenerateRequest):
+if LOCAL_MODE:
+  @app.post("/api/generate")
+  async def ollama_generate(req: OllamaGenerateRequest):
     """Ollama API: Generate"""
     chat_req = ChatRequest(
         model=req.model,
