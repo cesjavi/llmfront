@@ -43,6 +43,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // File input change
     document.getElementById('imageInput').addEventListener('change', handleImageSelection);
+
+    // Paste images from clipboard (Ctrl+V)
+    document.addEventListener('paste', handlePaste);
 });
 
 // ─── CORE CHAT ───
@@ -241,6 +244,25 @@ async function handleImageSelection(e) {
         await processImageFile(file);
     }
     e.target.value = ''; // Reset for next selection
+}
+
+async function handlePaste(e) {
+    const items = Array.from(e.clipboardData?.items || []);
+    const imageItems = items.filter(item => item.type.startsWith('image/'));
+    if (imageItems.length === 0) return;
+
+    // Solo activar si el modelo soporta visión
+    if (!state.activeModel?.supports_vision) {
+        showToast('El modelo activo no soporta imágenes', 'error');
+        return;
+    }
+
+    e.preventDefault();
+    for (const item of imageItems) {
+        const file = item.getAsFile();
+        if (file) await processImageFile(file);
+    }
+    showToast(`📋 ${imageItems.length} imagen${imageItems.length > 1 ? 'es' : ''} pegada${imageItems.length > 1 ? 's' : ''}`, 'success');
 }
 
 function processImageFile(file) {
@@ -467,24 +489,44 @@ function renderLocalModelsList(data) {
     models.forEach(m => {
         const card = document.createElement('div');
         card.className = `local-model-card ${m.is_loaded ? 'is-loaded' : ''} ${m.is_partial ? 'is-partial' : ''}`;
+
+        const isComplete = m.is_complete;
+        const actionLabel = m.is_loaded ? 'Usar' : isComplete ? 'Cargar' : '▶ Reanudar';
+        const actionClass = m.is_loaded ? 'use' : isComplete ? 'load' : 'resume';
+        const statusLabel = m.is_loaded ? 'Cargado' : isComplete ? 'Listo' : 'Incompleto';
+        const badgeClass  = m.is_loaded ? 'loaded' : isComplete ? 'downloaded' : 'partial';
+
         card.innerHTML = `
             <div class="local-model-icon">💻</div>
             <div class="local-model-info">
                 <div class="local-model-name">${m.name}</div>
                 <div class="local-model-meta">
                     ${m.id} · ${m.size_gb || 0} GB
-                    <span class="local-badge ${m.is_loaded ? 'loaded' : 'downloaded'}">${m.is_loaded ? 'Cargado' : m.is_complete ? 'Listo' : 'Incompleto'}</span>
+                    <span class="local-badge ${badgeClass}">${statusLabel}</span>
                 </div>
             </div>
             <div class="local-model-actions">
-                <button class="local-action-btn ${m.is_loaded ? 'use' : 'load'}">${m.is_loaded ? 'Usar' : 'Cargar'}</button>
+                <button class="local-action-btn ${actionClass}">${actionLabel}</button>
+                <button class="local-action-btn delete" title="Eliminar del disco">🗑️</button>
             </div>
         `;
-        card.querySelector('button').onclick = () => {
+
+        // Acción principal: cargar/usar si completo, reanudar si parcial
+        card.querySelectorAll('.local-action-btn')[0].onclick = () => {
             currentModalModel = m;
             openDownloadModal(m);
-            showLoadStep(m);
+            if (isComplete) {
+                showLoadStep(m);
+            } else {
+                // Parcial: mostrar sección de descarga para reanudar
+                document.getElementById('dlModalTitle').innerText = 'Reanudar descarga';
+                document.getElementById('dlConfirmBtn').innerText = '▶ Reanudar descarga';
+            }
         };
+
+        // Botón eliminar
+        card.querySelectorAll('.local-action-btn')[1].onclick = () => deleteLocalModel(m);
+
         list.appendChild(card);
     });
 }
@@ -694,16 +736,91 @@ async function confirmDownload() {
         const data = await res.json();
         showToast("Descarga iniciada", "info");
         state.downloading[currentModalModel.id] = true;
-        // The SSE will handle progress automatically
+        // Conectar SSE para progress en tiempo real
+        listenDownloadProgress(currentModalModel.id);
     } catch (e) { showToast(e.message, "error"); }
+}
+
+function listenDownloadProgress(modelId) {
+    const encodedId = modelId.split('/').map(encodeURIComponent).join('/');
+    const es = new EventSource(`/models/download/${encodedId}/progress`);
+
+    es.onmessage = (e) => {
+        let data;
+        try { data = JSON.parse(e.data); } catch { return; }
+
+        if (data._end) { es.close(); return; }
+
+        const dl  = data.download || {};
+        const ld  = data.load    || {};
+
+        // Actualizar barra de descarga si el modal está abierto para este modelo
+        const modalId = document.getElementById('dlModalModelId')?.innerText;
+        const modalOpen = document.getElementById('downloadModal')?.style.display !== 'none';
+
+        if (modalOpen && modalId === modelId) {
+            // Progreso de descarga
+            if (dl.size_downloaded_gb !== undefined) {
+                const pct = dl.progress || 0;
+                document.getElementById('dlDownloadBar').style.width = pct + '%';
+                document.getElementById('dlDownloadPct').innerText = pct + '%';
+                document.getElementById('dlDownloadMsg').innerText = dl.message || '';
+                const gb = (dl.size_downloaded_gb || 0).toFixed(2);
+                document.getElementById('dlDownloadSize').innerText = `${gb} GB descargados`;
+            }
+            // Progreso de carga en memoria
+            if (ld.status === 'loading' || ld.status === 'loaded') {
+                document.getElementById('dlSectionLoad').style.display = 'block';
+                const lpct = ld.progress || 0;
+                document.getElementById('dlLoadBar').style.width = lpct + '%';
+                document.getElementById('dlLoadPct').innerText = lpct + '%';
+                document.getElementById('dlLoadMsg').innerText = ld.message || '';
+            }
+        }
+
+        // Descarga completada
+        if (dl.status === 'done') {
+            delete state.downloading[modelId];
+            // Refrescar listas
+            loadLocalModels();
+            loadFeaturedModels();
+            // Si el modal sigue abierto para este modelo, ir al paso de carga
+            if (modalOpen && modalId === modelId) {
+                currentModalModel = { ...currentModalModel, is_downloaded: true, is_complete: true };
+                showLoadStep(currentModalModel);
+                showToast('✅ Descarga completa: ' + modelId.split('/').pop(), 'success');
+            } else {
+                showToast('✅ Descarga completa: ' + modelId.split('/').pop(), 'success');
+            }
+        }
+
+        // Carga en memoria completada
+        if (ld.status === 'loaded' && modalOpen && modalId === modelId) {
+            document.getElementById('dlLoadMsg').innerText = '✓ Listo para usar';
+            document.getElementById('dlLoadBar').style.width = '100%';
+            document.getElementById('dlLoadPct').innerText = '100%';
+            document.getElementById('dlModalActionsLoad').style.display = 'flex';
+        }
+
+        if (dl.status === 'error') {
+            delete state.downloading[modelId];
+            showToast('❌ Error en descarga: ' + (dl.message || ''), 'error');
+            es.close();
+        }
+    };
+
+    es.onerror = () => es.close();
 }
 
 async function loadLocalModel() {
     const btn = document.getElementById('dlLoadBtn');
     btn.disabled = true;
     btn.innerText = "⏳ Cargando...";
-    
+
     document.getElementById('dlSectionLoad').style.display = 'block';
+    document.getElementById('dlLoadMsg').innerText = 'Iniciando carga en memoria...';
+    document.getElementById('dlLoadBar').style.width = '0%';
+    document.getElementById('dlLoadPct').innerText = '0%';
 
     try {
         const res = await fetch('/models/load', {
@@ -715,8 +832,69 @@ async function loadLocalModel() {
                 device: 'auto'
             })
         });
-        showToast("Iniciando carga...", "info");
-    } catch (e) { showToast(e.message, "error"); }
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.detail || `Error ${res.status}`);
+        }
+        showToast('🧠 Cargando modelo en memoria...', 'info');
+        // Escuchar SSE de progreso (mismo endpoint que descarga, cubre estado de carga)
+        listenLoadProgress(currentModalModel.id);
+    } catch (e) {
+        showToast(e.message, 'error');
+        btn.disabled = false;
+        btn.innerText = '🧠 Cargar en memoria';
+    }
+}
+
+function listenLoadProgress(modelId) {
+    const encodedId = modelId.split('/').map(encodeURIComponent).join('/');
+    const es = new EventSource(`/models/download/${encodedId}/progress`);
+
+    es.onmessage = (e) => {
+        let data;
+        try { data = JSON.parse(e.data); } catch { return; }
+        if (data._end) { es.close(); return; }
+
+        const ld = data.load || {};
+        const modalId   = document.getElementById('dlModalModelId')?.innerText;
+        const modalOpen = document.getElementById('downloadModal')?.style.display !== 'none';
+
+        if (modalOpen && modalId === modelId) {
+            const lpct = ld.progress || 0;
+            document.getElementById('dlLoadBar').style.width = lpct + '%';
+            document.getElementById('dlLoadPct').innerText = lpct + '%';
+            if (ld.message) document.getElementById('dlLoadMsg').innerText = ld.message;
+        }
+
+        if (ld.status === 'loaded') {
+            es.close();
+            // Refrescar lista local
+            loadLocalModels();
+            loadFeaturedModels();
+            showToast('✅ Modelo cargado en memoria', 'success');
+            if (modalOpen && modalId === modelId) {
+                document.getElementById('dlLoadMsg').innerText = '✓ Modelo cargado y listo';
+                document.getElementById('dlLoadBar').style.width = '100%';
+                document.getElementById('dlLoadPct').innerText = '100%';
+                document.getElementById('dlModalActionsLoad').style.display = 'flex';
+                document.getElementById('dlLoadBtn').disabled = false;
+                document.getElementById('dlLoadBtn').innerText = '🧠 Cargar en memoria';
+            }
+        }
+
+        if (ld.status === 'error') {
+            es.close();
+            const msg = ld.message || 'Error desconocido';
+            showToast('❌ Error al cargar: ' + msg, 'error');
+            if (modalOpen && modalId === modelId) {
+                document.getElementById('dlLoadMsg').innerText = '❌ ' + msg;
+                document.getElementById('dlLoadBtn').disabled = false;
+                document.getElementById('dlLoadBtn').innerText = '🧠 Reintentar';
+            }
+        }
+    };
+
+    es.onerror = () => es.close();
 }
 
 function useLocalModel() {
@@ -729,8 +907,38 @@ function closeDownloadModal() {
     document.getElementById('downloadModal').style.display = 'none';
 }
 
+async function deleteLocalModel(m) {
+    const label = m.name || m.id;
+    if (!confirm(`¿Eliminar "${label}" del disco? Esta acción no se puede deshacer.`)) return;
+
+    try {
+        const res = await fetch(`/models/local/${encodeURIComponent(m.id)}`, { method: 'DELETE' });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.detail || `Error ${res.status}`);
+        }
+        showToast(`🗑️ "${label}" eliminado`, 'success');
+        // Si era el modelo activo, limpiar selección
+        if (state.activeModel?.id === m.id) {
+            state.activeModel = null;
+            state.isLocal = false;
+            document.getElementById('activeModelName').innerText = 'Sin seleccionar';
+            document.getElementById('activeModelId').innerText = '—';
+            document.getElementById('chatModelLabel').innerText = 'Seleccioná un modelo para comenzar';
+            updateVisionSupport();
+        }
+        loadLocalModels();
+        loadFeaturedModels(); // Refrescar badge "Local" en la grilla
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+
 function checkDownloadsProgress() {
-    // This could call /models/download/{id}/status for active downloads
+    // Refrescar lista local si hay descargas activas en segundo plano
+    if (Object.keys(state.downloading).length > 0) {
+        loadLocalModels();
+    }
 }
 
 /**** SIDEBAR TOGGLE ****/

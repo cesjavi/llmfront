@@ -23,9 +23,9 @@ from threading import Thread, Lock
 from typing import AsyncGenerator, Optional
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from huggingface_hub import InferenceClient, snapshot_download
@@ -73,7 +73,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── Estado global para inferencia local ─────────────────────────────────────
+# ─── Middleware para Debug (Ver qué pide Twinny) ─────────────────────────────
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    path = request.url.path
+    # No loggear /system/info para no ensuciar la consola
+    if path != "/system/info":
+        logger.info(f"🔔 Request: {request.method} {path}")
+    response = await call_next(request)
+    return response
+
+@app.get("/")
+async def root_health():
+    return {"status": "ok", "app": "LLMFront", "ollama_compat": True}
 
 # download_state[model_key] = {status, progress, message, size_gb}
 _download_state: dict[str, dict] = {}
@@ -693,7 +705,7 @@ async def search_models(req: ModelSearchRequest):
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
                 json={
-                    "model": "llama3-8b-8192",
+                    "model": "llama-3.1-8b-instant",
                     "messages": [{"role": "user", "content": groq_prompt}],
                     "temperature": 0.2,
                     "max_tokens": 50
@@ -1033,6 +1045,13 @@ async def stream_local(req: ChatRequest) -> AsyncGenerator[str, None]:
     key = _model_key(req.model)
     with _model_lock:
         model_data = _loaded_models.get(key)
+        # Búsqueda por alias corto
+        if not model_data:
+            for loaded_key, data in _loaded_models.items():
+                short_name = loaded_key.split("/")[-1].split("-")[0].lower()
+                if short_name == key.lower():
+                    model_data = data
+                    break
 
     if not model_data:
         yield f"data: {json.dumps({'error': 'El modelo no está cargado. Cargalo primero en la sección Modelos → Local.'})}\n\n"
@@ -1083,17 +1102,28 @@ async def stream_local(req: ChatRequest) -> AsyncGenerator[str, None]:
                 tokenize=False,
                 add_generation_prompt=True,
             )
-        except Exception:
-            parts = []
-            if req.system_prompt:
-                parts.append(f"[SYSTEM] {req.system_prompt}")
-            for msg in req.messages:
-                role = "Usuario" if msg.role == "user" else "Asistente"
-                has_img = images and msg == last_user_msg
-                prefix = f"[{len(images)} Imágenes] " if has_img else ""
-                parts.append(f"{role}: {prefix}{msg.content}")
-            parts.append("Asistente:")
-            input_text = "\n".join(parts)
+        except Exception as e:
+            logger.warning(f"apply_chat_template falló ({e}). Reintentando sin system prompt...")
+            # Muchos modelos fallan si se les pasa un "system" prompt. Lo removemos e intentamos de nuevo.
+            messages_no_system = [m for m in messages if m["role"] != "system"]
+            try:
+                input_text = template_engine.apply_chat_template(
+                    messages_no_system,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            except Exception as e2:
+                logger.error(f"apply_chat_template volvió a fallar ({e2}). Usando fallback crudo.")
+                parts = []
+                if req.system_prompt:
+                    parts.append(f"[SYSTEM] {req.system_prompt}")
+                for msg in req.messages:
+                    role = "Usuario" if msg.role == "user" else "Asistente"
+                    has_img = images and msg == last_user_msg
+                    prefix = f"[{len(images)} Imágenes] " if has_img else ""
+                    parts.append(f"{role}: {prefix}{msg.content}")
+                parts.append("Asistente:")
+                input_text = "\n".join(parts)
 
         if supports_vision and processor is not None and images:
             inputs = processor(
@@ -1194,23 +1224,69 @@ async def chat_complete(req: ChatRequest):
 
 
 if LOCAL_MODE:
+    @app.get("/api/version")
+    async def ollama_version():
+        """Ollama API: Version check (used by Twinny, Continue and other clients as health check)"""
+        return {"version": "0.1.32"}
+
+if LOCAL_MODE:
+    @app.post("/api/show")
+    async def ollama_show(req: dict):
+        """Ollama API: Show model info"""
+        model_id = req.get("name", req.get("model", ""))
+        return {
+            "modelfile": "",
+            "parameters": "",
+            "template": "",
+            "details": {"format": "pytorch", "family": "", "parameter_size": "", "quantization_level": ""},
+            "model_info": {"general.name": model_id},
+        }
+
+if LOCAL_MODE:
     @app.get("/api/tags")
     async def ollama_tags():
-        """Ollama API: List downloaded models"""
+        """Ollama API: List downloaded models (Perfect mock)"""
         models = []
         for d in MODELS_CACHE_DIR.iterdir():
             if d.is_dir():
                 model_id = d.name.replace("--", "/", 1)
                 if _is_downloaded(model_id):
+                    # Nombre original
                     models.append({
                         "name": model_id,
                         "model": model_id,
                         "modified_at": datetime.now().isoformat() + "Z",
                         "size": int(_dir_size_gb(d) * 1e9),
-                        "digest": "",
-                        "details": {"format": "pytorch", "family": "", "parameter_size": "", "quantization_level": ""}
+                        "digest": "fake-digest-12345",
+                        "details": {
+                            "parent_model": "",
+                            "format": "gguf",
+                            "family": "llama",
+                            "families": ["llama"],
+                            "parameter_size": "1.7B",
+                            "quantization_level": "Q4_0"
+                        }
                     })
+                    # Alias corto (ej: smollm2)
+                    short_name = model_id.split("/")[-1].split("-")[0].lower()
+                    if short_name and short_name != model_id:
+                        models.append({
+                            "name": short_name,
+                            "model": short_name,
+                            "modified_at": datetime.now().isoformat() + "Z",
+                            "size": int(_dir_size_gb(d) * 1e9),
+                            "digest": "fake-digest-12345",
+                            "details": {
+                                "parent_model": "",
+                                "format": "gguf",
+                                "family": "llama",
+                                "families": ["llama"],
+                                "parameter_size": "1.7B",
+                                "quantization_level": "Q4_0"
+                            }
+                        })
         return {"models": models}
+
 
 async def _ollama_stream(generator, is_chat=True, model_name=""):
     async for chunk in generator:
@@ -1258,73 +1334,193 @@ async def _ollama_stream(generator, is_chat=True, model_name=""):
                 }) + "\n"
 
 if LOCAL_MODE:
-  @app.post("/api/chat")
-  async def ollama_chat(req: OllamaChatRequest):
-    """Ollama API: Chat"""
-    chat_req = ChatRequest(
-        model=req.model,
-        messages=[Message(role=m.role, content=m.content) for m in req.messages],
-        use_local=True,
-        temperature=req.options.get("temperature", 0.7),
-        top_p=req.options.get("top_p", 0.9),
-        max_new_tokens=req.options.get("num_predict", 512),
-        stream=req.stream
-    )
-    generator = stream_local(chat_req)
-    
-    if req.stream:
-        return StreamingResponse(_ollama_stream(generator, True, req.model), media_type="application/x-ndjson")
-    else:
-        full_text = ""
-        async for chunk in generator:
-            if chunk.startswith("data: "):
-                try:
-                    data = json.loads(chunk[6:])
-                    if "token" in data:
-                        full_text += data["token"]
-                except Exception:
-                    pass
-        return {
-            "model": req.model,
-            "created_at": datetime.now().isoformat() + "Z",
-            "message": {"role": "assistant", "content": full_text},
-            "done": True
-        }
+    @app.post("/api/chat")
+    async def ollama_chat(req: dict):
+        """Ollama API: Chat (Robust version)"""
+        print(f"\n🚀 OLLAMA CHAT REQUEST: {req}\n")
+        model_id = req.get("model", "")
+        messages = req.get("messages", [])
+        stream   = req.get("stream", True)
+        options  = req.get("options", {})
+
+        chat_req = ChatRequest(
+            model=model_id,
+            messages=[Message(role=m.get("role","user"), content=m.get("content","")) for m in messages],
+            use_local=True,
+            temperature=options.get("temperature", 0.7),
+            top_p=options.get("top_p", 0.9),
+            max_new_tokens=options.get("num_predict", 512),
+            stream=stream
+        )
+        generator = stream_local(chat_req)
+        
+        if stream:
+            return StreamingResponse(_ollama_stream(generator, True, model_id), media_type="application/x-ndjson")
+        else:
+            full_text = ""
+            async for chunk in generator:
+                if chunk.startswith("data: "):
+                    try:
+                        data = json.loads(chunk[6:])
+                        if "token" in data: full_text += data["token"]
+                    except: pass
+            return {
+                "model": model_id,
+                "created_at": datetime.now().isoformat() + "Z",
+                "message": {"role": "assistant", "content": full_text},
+                "done": True
+            }
 
 if LOCAL_MODE:
-  @app.post("/api/generate")
-  async def ollama_generate(req: OllamaGenerateRequest):
-    """Ollama API: Generate"""
-    chat_req = ChatRequest(
-        model=req.model,
-        messages=[Message(role="user", content=req.prompt)],
-        system_prompt=req.system,
-        use_local=True,
-        temperature=req.options.get("temperature", 0.7),
-        top_p=req.options.get("top_p", 0.9),
-        max_new_tokens=req.options.get("num_predict", 512),
-        stream=req.stream
-    )
-    generator = stream_local(chat_req)
+    @app.post("/api/generate")
+    async def ollama_generate(req: dict):
+        """Ollama API: Generate (Robust version)"""
+        print(f"\n🚀 OLLAMA GENERATE REQUEST: {req}\n")
+        model_id = req.get("model", "")
+        prompt   = req.get("prompt", "")
+        system   = req.get("system", "")
+        stream   = req.get("stream", True)
+        options  = req.get("options", {})
 
-    if req.stream:
-        return StreamingResponse(_ollama_stream(generator, False, req.model), media_type="application/x-ndjson")
-    else:
-        full_text = ""
-        async for chunk in generator:
-            if chunk.startswith("data: "):
+        chat_req = ChatRequest(
+            model=model_id,
+            messages=[Message(role="user", content=prompt)],
+            system_prompt=system,
+            use_local=True,
+            temperature=options.get("temperature", 0.7),
+            top_p=options.get("top_p", 0.9),
+            max_new_tokens=options.get("num_predict", 512),
+            stream=stream
+        )
+        generator = stream_local(chat_req)
+
+        if stream:
+            return StreamingResponse(_ollama_stream(generator, False, model_id), media_type="application/x-ndjson")
+        else:
+            full_text = ""
+            async for chunk in generator:
+                if chunk.startswith("data: "):
+                    try:
+                        data = json.loads(chunk[6:])
+                        if "token" in data: full_text += data["token"]
+                    except: pass
+            return {
+                "model": model_id,
+                "created_at": datetime.now().isoformat() + "Z",
+                "response": full_text,
+                "done": True
+            }
+
+# ─── OpenAI-compatible endpoint (for Twinny v7+ and other OpenAI clients) ─────
+if LOCAL_MODE:
+    @app.post("/v1/chat/completions")
+    async def openai_chat_completions(req: dict):
+        """OpenAI-compatible chat endpoint (used by Twinny v7+ and Continue)"""
+        model_id   = req.get("model", "")
+        messages   = req.get("messages", [])
+        stream     = req.get("stream", True)
+        temperature = req.get("temperature", 0.7)
+        max_tokens  = req.get("max_tokens", 512)
+        top_p       = req.get("top_p", 0.9)
+
+        # Parsear mensajes soportando formato multimodal de OpenAI
+        parsed_messages = []
+        for m in messages:
+            content = m.get("content", "")
+            if isinstance(content, list):
+                # Extraer el texto si viene como lista de diccionarios
+                text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                content = "\n".join(text_parts)
+            parsed_messages.append(Message(role=m.get("role", "user"), content=str(content)))
+
+        chat_req = ChatRequest(
+            model=model_id,
+            messages=parsed_messages,
+            use_local=True,
+            temperature=temperature,
+            top_p=top_p,
+            max_new_tokens=max_tokens,
+            stream=stream,
+        )
+
+        async def openai_stream(generator):
+            import time
+            async for chunk in generator:
+                if not chunk.startswith("data: "):
+                    continue
                 try:
                     data = json.loads(chunk[6:])
-                    if "token" in data:
-                        full_text += data["token"]
                 except Exception:
-                    pass
-        return {
-            "model": req.model,
-            "created_at": datetime.now().isoformat() + "Z",
-            "response": full_text,
-            "done": True
-        }
+                    continue
+                
+                error = data.get("error")
+                if error:
+                    yield "data: " + json.dumps({
+                        "id": "chatcmpl-llmfront",
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model_id,
+                        "choices": [{"delta": {"content": f"⚠️ Error: {error}"}, "index": 0, "finish_reason": "stop"}]
+                    }) + "\n\n"
+                    yield "data: [DONE]\n\n"
+                    continue
+
+                token = data.get("token", "")
+                done  = data.get("done", False)
+                if token:
+                    yield "data: " + json.dumps({
+                        "id": "chatcmpl-llmfront",
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model_id,
+                        "choices": [{"delta": {"content": token}, "index": 0, "finish_reason": None}]
+                    }) + "\n\n"
+                if done:
+                    yield "data: " + json.dumps({
+                        "id": "chatcmpl-llmfront",
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model_id,
+                        "choices": [{"delta": {}, "index": 0, "finish_reason": "stop"}]
+                    }) + "\n\n"
+                    yield "data: [DONE]\n\n"
+
+        if stream:
+            return StreamingResponse(openai_stream(stream_local(chat_req)), media_type="text/event-stream")
+        else:
+            full_text = ""
+            async for chunk in stream_local(chat_req):
+                if chunk.startswith("data: "):
+                    try:
+                        data = json.loads(chunk[6:])
+                        if "token" in data:
+                            full_text += data["token"]
+                    except Exception:
+                        pass
+            import time
+            return {
+                "id": "chatcmpl-llmfront",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model_id,
+                "choices": [{"message": {"role": "assistant", "content": full_text}, "index": 0, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            }
+
+# ─── OpenAI models list (for clients that check /v1/models) ───────────────────
+if LOCAL_MODE:
+    @app.get("/v1/models")
+    async def openai_models():
+        """OpenAI-compatible model list"""
+        import time
+        models = []
+        for d in MODELS_CACHE_DIR.iterdir():
+            if d.is_dir():
+                model_id = d.name.replace("--", "/", 1)
+                if _is_downloaded(model_id):
+                    models.append({"id": model_id, "object": "model", "created": int(time.time()), "owned_by": "local"})
+        return {"object": "list", "data": models}
+
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -1336,6 +1532,7 @@ async def serve_frontend():
 
 if __name__ == "__main__":
     import uvicorn
-    host = os.getenv("HOST", "127.0.0.1")
-    port = int(os.getenv("PORT", 8000))
+    host = os.getenv("HOST", "0.0.0.0")
+    # Usar puerto oficial de Ollama por defecto si no hay variable ENV
+    port = int(os.getenv("PORT", 11434))
     uvicorn.run("main:app", host=host, port=port, reload=True, reload_excludes=["models_cache", "venv"])

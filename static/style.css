@@ -1,4 +1,4 @@
-/* ══════════════════════════════════════════════════════
+﻿/* ══════════════════════════════════════════════════════
    LLMFront – Stylesheet
    Dark mode glassmorphism with HuggingFace accent colors
    ══════════════════════════════════════════════════════ */
@@ -1337,6 +1337,12 @@ textarea#userInput::placeholder { color: var(--text-muted); }
   border-color: transparent;
   color: #000;
 }
+.local-action-btn.resume {
+  background: var(--accent-glow);
+  border-color: var(--border-active);
+  color: var(--accent-hf);
+}
+.local-action-btn.resume:hover { filter: brightness(1.2); }
 .local-action-btn.delete {
   background: transparent;
   border-color: rgba(248,113,113,0.3);
@@ -1360,11 +1366,13 @@ textarea#userInput::placeholder { color: var(--text-muted); }
   color: var(--accent-green);
   border: 1px solid rgba(74,222,128,0.3);
 }
-
-/* ══════ DOWNLOAD MODAL ══════ */
-.modal-download {
-  max-width: 520px;
+.local-badge.partial {
+  background: rgba(255,157,0,0.15);
+  color: var(--accent-hf);
+  border: 1px solid rgba(255,157,0,0.35);
 }
+/* ══════ DOWNLOAD MODAL ══════ */
+.modal-download { max-width: 520px; }
 .modal-download-btn {
   padding: 9px 18px;
   background: rgba(108,135,255,0.1);
@@ -1377,10 +1385,7 @@ textarea#userInput::placeholder { color: var(--text-muted); }
   transition: all 0.15s;
 }
 .modal-download-btn:hover { background: rgba(108,135,255,0.2); }
-
-.dl-section {
-  margin: 14px 0;
-}
+.dl-section { margin: 14px 0; }
 .dl-label {
   display: flex;
   justify-content: space-between;
