@@ -4,6 +4,7 @@ LLMFront - Backend FastAPI
 Modos de operación (LLMFRONT_MODE en .env):
   - "api"   → Solo cloud: HF Inference API + Groq. Sin torch/transformers. ~100 MB RAM.
   - "local" → Full local: descarga modelos y corre con transformers + torch. RAM alta.
+  - "both"  → Híbrido: habilita inferencia local Y cloud al mismo tiempo.
 
 Variables clave en .env:
   LLMFRONT_MODE=api            # "api" o "local" (default: "local")
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 # ─── Configuración de modo ────────────────────────────────────────────────────
 LLMFRONT_MODE = os.getenv("LLMFRONT_MODE", "local").lower()
-LOCAL_MODE = LLMFRONT_MODE == "local"
+LOCAL_MODE = LLMFRONT_MODE in ("local", "both")
 GROQ_AI_SEARCH_ENABLED = os.getenv("GROQ_AI_SEARCH_ENABLED", "true").lower() in ("1", "true", "yes")
 
 HF_TOKEN = os.getenv("HF_TOKEN", "")
@@ -49,7 +50,11 @@ MODELS_CACHE_DIR = Path("./models_cache")
 if LOCAL_MODE:
     MODELS_CACHE_DIR.mkdir(exist_ok=True)
 
-_mode_label = "LOCAL 🖥️  (inferencia local habilitada)" if LOCAL_MODE else "API ☁️  (solo cloud, sin torch)"
+_mode_label = (
+    "BOTH 🔀  (local + cloud habilitados)" if LLMFRONT_MODE == "both"
+    else "LOCAL 🖥️  (inferencia local habilitada)" if LOCAL_MODE
+    else "API ☁️  (solo cloud, sin torch)"
+)
 logger.info(f"🚀 LLMFront modo: {_mode_label}")
 if GROQ_AI_SEARCH_ENABLED and os.getenv("GROQ_API_KEY", ""):
     logger.info("🔍 Búsqueda IA (Groq): HABILITADA")
