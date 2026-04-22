@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=3" />
+  <link rel="stylesheet" href="/static/style.css?v=9" />
 </head>
 <body>
 
@@ -66,12 +66,21 @@
 
   <!-- Token Config -->
   <div class="token-section">
-    <div class="section-label">HF TOKEN</div>
+    <div class="section-label" style="display:flex; justify-content:space-between; align-items:center;">
+      <span>API KEYS</span>
+      <select id="keyProviderSelect" style="background:var(--bg-secondary); border:1px solid var(--border); color:var(--text); border-radius:4px; font-size:10px; padding:2px;" onchange="updateTokenInputVisibility()">
+        <option value="hf">Hugging Face</option>
+        <option value="groq">Groq</option>
+        <option value="openrouter">OpenRouter</option>
+      </select>
+    </div>
     <div class="token-input-wrap">
       <input type="password" id="hfTokenInput" class="token-input" placeholder="hf_..." />
+      <input type="password" id="groqTokenInput" class="token-input" placeholder="gsk_..." style="display:none;" />
+      <input type="password" id="openrouterTokenInput" class="token-input" placeholder="sk-or-v1-..." style="display:none;" />
       <button class="change-model-btn token-save-btn" id="saveTokenBtn" title="Guardar token">💾</button>
     </div>
-    <div class="token-hint">Necesario para modo API. <a href="https://huggingface.co/settings/tokens" target="_blank">Obtener token</a></div>
+    <div class="token-hint" id="tokenHint">Necesario para modo API. <a href="https://huggingface.co/settings/tokens" target="_blank">Obtener token</a></div>
   </div>
 
   <!-- Language -->
@@ -98,9 +107,11 @@
       </div>
       <!-- Mode toggle: API / Local -->
       <div class="mode-toggle" id="modeToggle" title="Cambiar modo de inferencia">
-        <button class="mode-btn active" id="modeApiBtn" onclick="setMode('api')">
-          ☁️ API
-        </button>
+        <select id="chatProviderSelect" style="background: transparent; border: none; color: inherit; font-size: inherit; font-weight: 500; cursor: pointer; outline: none; padding: 4px; margin-right: 4px;" onchange="setProvider(this.value)">
+          <option value="hf">☁️ HF API</option>
+          <option value="groq">⚡ Groq</option>
+          <option value="openrouter">🌐 OpenRouter</option>
+        </select>
         <button class="mode-btn" id="modeLocalBtn" onclick="setMode('local')">
           💻 Local
         </button>
@@ -364,6 +375,32 @@
 
 </main>
 
+<!-- ══════════════ CANVAS PANEL ══════════════ -->
+<aside class="canvas-panel collapsed" id="canvasPanel">
+  <div class="canvas-header">
+    <div class="canvas-title">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+      <span id="canvasTitleText">Artifact Canvas</span>
+    </div>
+    <div class="canvas-actions">
+      <button class="icon-btn" onclick="copyCanvasCode()" title="Copiar código fuente">📋</button>
+      <button class="icon-btn" onclick="toggleCanvas(false)" title="Cerrar Canvas">✖</button>
+    </div>
+  </div>
+  <div class="canvas-body">
+    <div class="canvas-tabs">
+      <button class="canvas-tab active" onclick="switchCanvasTab('preview')" id="canvasTabPreview">👁️ Preview</button>
+      <button class="canvas-tab" onclick="switchCanvasTab('code')" id="canvasTabCode">💻 Código</button>
+    </div>
+    <div class="canvas-content active" id="canvasPreviewWrap">
+      <iframe id="canvasIframe" sandbox="allow-scripts allow-modals"></iframe>
+    </div>
+    <div class="canvas-content" id="canvasCodeWrap" style="display:none;">
+      <textarea id="canvasCodeEditor" readonly></textarea>
+    </div>
+  </div>
+</aside>
+
 <!-- ══════════════ MODAL: CONFIRM MODEL (API) ══════════════ -->
 <div class="modal-overlay" id="modelConfirmModal">
   <div class="modal">
@@ -436,6 +473,7 @@
 
     <div class="modal-actions" id="dlModalActions">
       <button onclick="closeDownloadModal()" class="modal-cancel-btn">Cerrar</button>
+      <button onclick="cancelDownload()" class="modal-cancel-btn" id="dlCancelBtn" style="display:none; color: var(--danger); border-color: var(--danger)">🛑 Cancelar descarga</button>
       <button onclick="confirmDownload()" class="modal-confirm-btn" id="dlConfirmBtn">
         📥 Iniciar descarga
       </button>
@@ -477,6 +515,6 @@
 <div class="toast" id="toast"></div>
 
 <script src="/static/i18n.js"></script>
-<script src="/static/app.js?v=5"></script>
+<script src="/static/app.js?v=9"></script>
 </body>
 </html>

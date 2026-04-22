@@ -23,6 +23,9 @@ from threading import Thread, Lock
 from typing import AsyncGenerator, Optional
 from datetime import datetime
 from dotenv import load_dotenv
+from openai import AsyncOpenAI
+import threading
+import ctypes
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -117,6 +120,8 @@ class ChatRequest(BaseModel):
     stream: bool = True
     hf_token: Optional[str] = None
     use_local: bool = False          # True = usar modelo local descargado
+    provider: str = "hf"             # hf, local, groq, openrouter
+    api_key: Optional[str] = None
     images: Optional[list[ImageItem]] = None
 
 class ModelSearchRequest(BaseModel):
@@ -309,6 +314,15 @@ def _system_info() -> dict:
 
 # ─── Hilo de descarga ─────────────────────────────────────────────────────────
 
+class DownloadCancelled(Exception): pass
+
+def _async_raise(tid, exctype):
+    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(tid), ctypes.py_object(exctype))
+    if res == 0: raise ValueError("invalid thread id")
+    elif res != 1:
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(tid), None)
+        raise SystemError("PyThreadState_SetAsyncExc failed")
+
 def _download_thread(model_id: str, token: str):
     key = _model_key(model_id)
     local_dir = _model_local_dir(model_id)
@@ -343,6 +357,9 @@ def _download_thread(model_id: str, token: str):
             }
         logger.info(f"Download complete: {model_id} ({size} GB)")
 
+    except DownloadCancelled:
+        logger.info(f"Download cancelled by user: {model_id}")
+        # Clean state naturally
     except Exception as e:
         logger.error(f"Download error [{model_id}]: {e}")
         # ⚠ NO borrar archivos parciales — huggingface_hub los reutiliza para reanudar.
@@ -767,6 +784,21 @@ async def search_models(req: ModelSearchRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/models/size/{model_id:path}")
+async def get_model_size(model_id: str):
+    try:
+        resp = requests.get(f"https://huggingface.co/api/models/{model_id}", headers={"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            st = data.get("safetensors", {})
+            total_bytes = st.get("total")
+            if total_bytes:
+                return {"size_gb": round(total_bytes / 1e9, 2)}
+        return {"size_gb": None}
+    except Exception:
+        return {"size_gb": None}
+
+
 
 if LOCAL_MODE:
     @app.get("/models/local")
@@ -825,9 +857,33 @@ if LOCAL_MODE:
                 }
 
         token = req.hf_token or HF_TOKEN
-        t = Thread(target=_download_thread, args=(req.model_id, token), daemon=True)
+        
+        def run_thread():
+            with _download_lock:
+                _download_state[key]["thread_id"] = threading.get_ident()
+            _download_thread(req.model_id, token)
+
+        t = Thread(target=run_thread, daemon=True)
         t.start()
         return {"status": "started" if not is_partial else "resuming", "model_id": req.model_id}
+
+if LOCAL_MODE:
+    @app.post("/models/download/cancel")
+    async def cancel_download(model_id: str):
+        key = _model_key(model_id)
+        with _download_lock:
+            state = _download_state.get(key)
+            if state and state.get("status") == "downloading" and "thread_id" in state:
+                tid = state["thread_id"]
+                try:
+                    _async_raise(tid, DownloadCancelled)
+                    state["status"] = "cancelled"
+                    state["message"] = "Descarga cancelada"
+                    return {"status": "cancelled"}
+                except Exception as e:
+                    return {"status": "error", "message": str(e)}
+        return {"status": "not_downloading"}
+
 
 
 if LOCAL_MODE:
@@ -859,7 +915,7 @@ if LOCAL_MODE:
 
             status = dl.get("status")
             load_status = ld.get("status")
-            if status in ("done", "error") and load_status in ("loaded", "error", ""):
+            if status in ("done", "error", "cancelled") and load_status in ("loaded", "error", ""):
                 if load_status not in ("loading",):
                     break
             timeout += 1.5
@@ -1011,6 +1067,8 @@ async def stream_hf_api(req: ChatRequest) -> AsyncGenerator[str, None]:
             messages.append({"role": msg.role, "content": msg.content})
 
     try:
+        prompt_tokens = len(str(messages)) // 4
+        completion_tokens = 0
         stream = client.chat_completion(
             model=req.model,
             messages=messages,
@@ -1021,10 +1079,14 @@ async def stream_hf_api(req: ChatRequest) -> AsyncGenerator[str, None]:
         )
         for chunk in stream:
             if chunk.choices and chunk.choices[0].delta.content:
+                completion_tokens += 1
                 yield f"data: {json.dumps({'token': chunk.choices[0].delta.content})}\n\n"
             await asyncio.sleep(0)
-        yield f"data: {json.dumps({'done': True})}\n\n"
+        
+        logger.info(f"API Stream done. Prompt: {prompt_tokens}, Comp: {completion_tokens}")
+        yield f"data: {json.dumps({'done': True, 'tokens': {'prompt': prompt_tokens, 'completion': completion_tokens}})}\n\n"
     except Exception as e:
+        logger.error(f"Error in stream_hf_api: {e}")
         msg = str(e)
         if "403" in msg or "401" in msg:
             msg = "Token inválido o sin acceso al modelo."
@@ -1035,6 +1097,65 @@ async def stream_hf_api(req: ChatRequest) -> AsyncGenerator[str, None]:
         elif "not supported" in msg.lower():
             msg = "Modelo no soportado por la Inference API. Usá el modo Local."
         yield f"data: {json.dumps({'error': msg})}\n\n"
+
+async def stream_openai_compatible_api(req: ChatRequest) -> AsyncGenerator[str, None]:
+    if not req.api_key:
+        yield f"data: {json.dumps({'error': f'Se necesita una API Key para usar {req.provider.upper()}.'})}\n\n"
+        return
+        
+    base_urls = {
+        "groq": "https://api.groq.com/openai/v1",
+        "openrouter": "https://openrouter.ai/api/v1"
+    }
+    base_url = base_urls.get(req.provider)
+    if not base_url:
+        yield f"data: {json.dumps({'error': 'Proveedor no válido.'})}\n\n"
+        return
+
+    client = AsyncOpenAI(api_key=req.api_key, base_url=base_url)
+    messages = []
+    if req.system_prompt:
+        messages.append({"role": "system", "content": req.system_prompt})
+    
+    # Procesar mensajes con soporte básico para OpenRouter vision
+    for msg in req.messages:
+        if msg.role == "user" and msg == req.messages[-1] and req.images:
+            content = [{"type": "text", "text": msg.content or "Describe las imágenes"}]
+            for img in req.images:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{img.mime_type};base64,{img.base64}"}
+                })
+            messages.append({"role": msg.role, "content": content})
+        else:
+            messages.append({"role": msg.role, "content": msg.content})
+
+    try:
+        prompt_tokens = len(str(messages)) // 4
+        completion_tokens = 0
+        
+        # Omitimos parameters que algunos modelos de openrouter no aceptan
+        extra_args = {}
+        if req.temperature > 0:
+            extra_args["temperature"] = req.temperature
+        
+        stream = await client.chat.completions.create(
+            model=req.model,
+            messages=messages,
+            max_tokens=req.max_new_tokens,
+            stream=True,
+            **extra_args
+        )
+        
+        async for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                completion_tokens += 1
+                yield f"data: {json.dumps({'token': chunk.choices[0].delta.content})}\n\n"
+                
+        yield f"data: {json.dumps({'done': True, 'tokens': {'prompt': prompt_tokens, 'completion': completion_tokens}})}\n\n"
+    except Exception as e:
+        logger.error(f"Error in stream_openai_compatible_api: {e}")
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1138,7 +1259,9 @@ async def stream_local(req: ChatRequest) -> AsyncGenerator[str, None]:
         try:
             device = next(model.parameters()).device
             inputs = {k: v.to(device) for k, v in inputs.items()}
+            prompt_tokens = inputs["input_ids"].shape[-1]
         except Exception:
+            prompt_tokens = len(input_text) // 4
             pass
 
         streamer = TextIteratorStreamer(
@@ -1162,10 +1285,12 @@ async def stream_local(req: ChatRequest) -> AsyncGenerator[str, None]:
         thread = threading.Thread(target=model.generate, kwargs=gen_kwargs)
         thread.start()
 
+        completion_tokens = 0
         for new_text in streamer:
+            completion_tokens += 1
             yield f"data: {json.dumps({'token': new_text})}\n\n"
         
-        yield f"data: {json.dumps({'done': True})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'tokens': {'prompt': prompt_tokens, 'completion': completion_tokens}})}\n\n"
 
     except Exception as e:
         logger.error(f"Local inference error: {e}")
@@ -1183,7 +1308,14 @@ async def chat_stream(req: ChatRequest):
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
-    generator = stream_local(req) if req.use_local else stream_hf_api(req)
+    
+    if req.use_local or req.provider == "local":
+        generator = stream_local(req)
+    elif req.provider in ["groq", "openrouter"]:
+        generator = stream_openai_compatible_api(req)
+    else:
+        generator = stream_hf_api(req)
+        
     return StreamingResponse(
         generator,
         media_type="text/event-stream",
@@ -1532,7 +1664,19 @@ async def serve_frontend():
 
 if __name__ == "__main__":
     import uvicorn
-    host = os.getenv("HOST", "0.0.0.0")
-    # Usar puerto oficial de Ollama por defecto si no hay variable ENV
+    import webbrowser
+    import threading
+    import time
+
+    host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", 11434))
+    
+    def open_browser():
+        time.sleep(1.5)
+        url_host = "127.0.0.1" if host == "0.0.0.0" else host
+        webbrowser.open(f"http://{url_host}:{port}/app")
+        
+    threading.Thread(target=open_browser, daemon=True).start()
+
     uvicorn.run("main:app", host=host, port=port, reload=True, reload_excludes=["models_cache", "venv"])
+

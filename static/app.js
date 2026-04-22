@@ -8,6 +8,9 @@ let state = {
     messages: [],
     pendingImages: [], // [{base64, mimeType}]
     hfToken: localStorage.getItem('hf_token') || '',
+    groqToken: localStorage.getItem('groq_token') || '',
+    openrouterToken: localStorage.getItem('openrouter_token') || '',
+    provider: 'hf',
     systemInfo: null,
     downloading: {},
     quant: 'none',
@@ -17,7 +20,10 @@ let state = {
 // ─── INIT ───
 document.addEventListener('DOMContentLoaded', () => {
     if (state.hfToken) document.getElementById('hfTokenInput').value = state.hfToken;
-    document.getElementById('saveTokenBtn').addEventListener('click', saveHfToken);
+    if (state.groqToken) document.getElementById('groqTokenInput').value = state.groqToken;
+    if (state.openrouterToken) document.getElementById('openrouterTokenInput').value = state.openrouterToken;
+    
+    document.getElementById('saveTokenBtn').addEventListener('click', saveTokens);
     document.getElementById('changeModelBtn').addEventListener('click', () => switchView('models'));
     document.getElementById('newChatBtn').addEventListener('click', clearChat);
     loadFeaturedModels();
@@ -80,6 +86,10 @@ async function sendMessage() {
     };
     scroll();
 
+    let currentKey = state.hfToken;
+    if (state.provider === 'groq') currentKey = state.groqToken;
+    if (state.provider === 'openrouter') currentKey = state.openrouterToken;
+
     const payload = {
         model: state.activeModel.id,
         messages: state.messages.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
@@ -89,7 +99,9 @@ async function sendMessage() {
         top_p: parseFloat(document.getElementById('topP').value),
         repetition_penalty: parseFloat(document.getElementById('repPenalty').value),
         stream: document.getElementById('streamToggle').checked,
-        hf_token: state.hfToken,
+        hf_token: state.hfToken, // For backwards compatibility or direct HF logic
+        api_key: currentKey,
+        provider: state.provider,
         use_local: state.isLocal,
         images: imagesToSend.length > 0 ? imagesToSend : null
     };
@@ -138,6 +150,14 @@ async function sendMessage() {
                         renderMessages();
                         scroll();
                     }
+                    if (data.done) {
+                        aiMsg.thinking = false;
+                        if (data.tokens) {
+                            aiMsg.tokens = data.tokens;
+                        }
+                        renderMessages();
+                        scroll();
+                    }
                 }
             }
         }
@@ -154,6 +174,12 @@ async function sendMessage() {
                 if (data.token) {
                     aiFullText += data.token;
                     aiMsg.content = aiFullText;
+                }
+                if (data.done) {
+                    aiMsg.thinking = false;
+                    if (data.tokens) {
+                        aiMsg.tokens = data.tokens;
+                    }
                 }
             }
             renderMessages();
@@ -194,12 +220,47 @@ function renderMessages() {
         const mdText = msg.thinking ? '<span class="thinking-dots"><span>.</span><span>.</span><span>.</span></span>' : formatMarkdown(text);
         
         contentHtml += `<div class="msg-bubble">${mdText}</div>`;
+        if (msg.tokens && !msg.thinking) {
+            contentHtml += `<div class="msg-tokens" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; text-align: right;">Tokens: ${msg.tokens.prompt} en prompt / ${msg.tokens.completion} generados</div>`;
+        }
+        let actionsHtml = '';
+        if (!msg.thinking && text) {
+            actionsHtml = `<div class="msg-actions">
+                <button onclick="copyMessage(this, ${idx})" class="icon-btn" title="Copiar mensaje">📋 Copiar</button>
+            </div>`;
+        }
+        
         div.innerHTML = `
             <div class="msg-avatar">${isUser ? 'Tu' : 'AI'}</div>
-            <div class="msg-content">${contentHtml}</div>
+            <div class="msg-content">
+                ${contentHtml}
+                ${actionsHtml}
+            </div>
         `;
         container.appendChild(div);
     });
+}
+
+function copyMessage(btn, idx) {
+    const msg = state.messages[idx];
+    if (msg && msg.content) {
+        navigator.clipboard.writeText(msg.content).then(() => {
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '✅ Copiado';
+            setTimeout(() => btn.innerHTML = originalText, 2000);
+        });
+    }
+}
+
+function copyCode(btn) {
+    const codeEl = btn.parentElement.nextElementSibling.querySelector('code');
+    if (codeEl) {
+        navigator.clipboard.writeText(codeEl.innerText).then(() => {
+            const originalText = btn.innerText;
+            btn.innerText = 'Copiado!';
+            setTimeout(() => btn.innerText = originalText, 2000);
+        });
+    }
 }
 
 function formatMarkdown(text) {
@@ -209,13 +270,84 @@ function formatMarkdown(text) {
         .replace(/>/g, '&gt;');
 
     return escaped
-        .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
+        .replace(/```(?:([a-zA-Z0-9_+-]+)\n)?([\s\S]*?)```/g, (match, lang, code) => {
+            const l = lang || 'texto';
+            const cleanLang = l.toLowerCase();
+            const isRenderable = ['html', 'svg', 'xml', 'react', 'javascript', 'js', 'css'].includes(cleanLang);
+            const renderBtn = isRenderable ? `<button class="copy-code-btn" onclick="openCanvas(this, '${cleanLang}')" style="color:var(--accent-hf); margin-left:8px; font-weight:bold;">✨ Renderizar</button>` : '';
+            return `<div class="code-block-wrapper"><div class="code-header"><span class="code-lang">${l}</span><div><button class="copy-code-btn" onclick="copyCode(this)">Copiar</button>${renderBtn}</div></div><pre><code>${code}</code></pre></div>`;
+        })
         .replace(/`([^`]+)`/g, '<code>$1</code>')
         .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
         .replace(/^\s*[-*]\s+(.+)$/gm, '<span class="md-list-item">$1</span>')
         .replace(/^\s*(\d+)\.\s+(.+)$/gm, '<strong>$1.</strong> $2')
         .replace(/\n/g, '<br/>');
 }
+
+// ─── CANVAS FUNCTIONS ───
+function toggleCanvas(forceState) {
+    const panel = document.getElementById('canvasPanel');
+    if (forceState === undefined) {
+        panel.classList.toggle('collapsed');
+    } else {
+        if (forceState) panel.classList.remove('collapsed');
+        else panel.classList.add('collapsed');
+    }
+}
+
+function switchCanvasTab(tab) {
+    document.getElementById('canvasTabPreview').classList.toggle('active', tab === 'preview');
+    document.getElementById('canvasTabCode').classList.toggle('active', tab === 'code');
+    
+    const previewWrap = document.getElementById('canvasPreviewWrap');
+    const codeWrap = document.getElementById('canvasCodeWrap');
+    
+    if (tab === 'preview') {
+        previewWrap.classList.add('active');
+        codeWrap.classList.remove('active');
+        codeWrap.style.display = 'none';
+        previewWrap.style.display = 'flex';
+    } else {
+        codeWrap.classList.add('active');
+        previewWrap.classList.remove('active');
+        previewWrap.style.display = 'flex';
+        codeWrap.style.display = 'flex';
+    }
+}
+
+function copyCanvasCode() {
+    const code = document.getElementById('canvasCodeEditor').value;
+    navigator.clipboard.writeText(code).then(() => {
+        showToast("Código copiado", "success");
+    });
+}
+
+function openCanvas(btn, lang) {
+    const codeEl = btn.parentElement.parentElement.nextElementSibling.querySelector('code');
+    if (!codeEl) return;
+    
+    // codeEl.innerText is already unescaped by the browser
+    let code = codeEl.innerText;
+    
+    document.getElementById('canvasCodeEditor').value = code;
+    document.getElementById('canvasTitleText').innerText = `Preview (${lang})`;
+    
+    const iframe = document.getElementById('canvasIframe');
+    
+    if (lang === 'svg') {
+        const svgHtml = `<!DOCTYPE html><html><body style="display:flex;justify-content:center;align-items:center;height:100vh;margin:0;">${code}</body></html>`;
+        iframe.srcdoc = svgHtml;
+    } else if (lang === 'js' || lang === 'javascript') {
+        const jsHtml = `<!DOCTYPE html><html><body><script>${code}</script></body></html>`;
+        iframe.srcdoc = jsHtml;
+    } else {
+        iframe.srcdoc = code;
+    }
+    
+    switchCanvasTab('preview');
+    toggleCanvas(true);
+}
+
 
 function getWelcomeHtml() {
     return `
@@ -375,23 +507,60 @@ function switchModelsTab(tab) {
     }
 }
 
-function setMode(mode) {
-    state.isLocal = (mode === 'local');
-    document.getElementById('modeApiBtn').classList.toggle('active', mode === 'api');
-    document.getElementById('modeLocalBtn').classList.toggle('active', mode === 'local');
+function updateTokenInputVisibility() {
+    const p = document.getElementById('keyProviderSelect').value;
+    document.getElementById('hfTokenInput').style.display = p === 'hf' ? 'block' : 'none';
+    document.getElementById('groqTokenInput').style.display = p === 'groq' ? 'block' : 'none';
+    document.getElementById('openrouterTokenInput').style.display = p === 'openrouter' ? 'block' : 'none';
     
-    document.getElementById('footerMode').innerText = mode === 'api' ? 'API ☁️' : 'Local 💻';
+    // hint updates
+    const hints = {
+        'hf': 'Necesario para modo API. <a href="https://huggingface.co/settings/tokens" target="_blank">Obtener token</a>',
+        'groq': 'Necesario para usar Groq. <a href="https://console.groq.com/keys" target="_blank">Obtener API Key</a>',
+        'openrouter': 'Necesario para usar OpenRouter. <a href="https://openrouter.ai/keys" target="_blank">Obtener API Key</a>'
+    };
+    document.getElementById('tokenHint').innerHTML = hints[p];
+}
+
+function setProvider(provider) {
+    state.provider = provider;
+    if (provider === 'local') {
+        state.isLocal = true;
+        document.getElementById('modeLocalBtn').classList.add('active');
+        document.getElementById('footerMode').innerText = 'Local 💻';
+    } else {
+        state.isLocal = false;
+        document.getElementById('modeLocalBtn').classList.remove('active');
+        document.getElementById('footerMode').innerText = `API ☁️ (${provider})`;
+    }
     updateVisionSupport();
 }
 
-function updateModeUI() {
-    setMode(state.isLocal ? 'local' : 'api');
+function setMode(mode) {
+    if (mode === 'local') {
+        setProvider('local');
+    } else {
+        setProvider(document.getElementById('chatProviderSelect').value);
+    }
 }
 
-function saveHfToken() {
+function updateModeUI() {
+    if (state.isLocal) {
+        document.getElementById('modeLocalBtn').classList.add('active');
+    } else {
+        document.getElementById('modeLocalBtn').classList.remove('active');
+    }
+}
+
+function saveTokens() {
     state.hfToken = document.getElementById('hfTokenInput').value.trim();
+    state.groqToken = document.getElementById('groqTokenInput').value.trim();
+    state.openrouterToken = document.getElementById('openrouterTokenInput').value.trim();
+    
     localStorage.setItem('hf_token', state.hfToken);
-    showToast(state.hfToken ? "HF Token guardado" : "HF Token eliminado", "success");
+    localStorage.setItem('groq_token', state.groqToken);
+    localStorage.setItem('openrouter_token', state.openrouterToken);
+    showToast("API Keys guardadas", "success");
 }
 
 function updateSlider(inputId, valueId, value, formatFn) {
@@ -577,6 +746,25 @@ function showModelModal(m) {
         closeModal();
     };
 
+    const sizeSpan = document.getElementById('modalModelSize') || document.createElement('div');
+    sizeSpan.id = 'modalModelSize';
+    sizeSpan.style.marginTop = '10px';
+    sizeSpan.style.color = 'var(--text-muted)';
+    sizeSpan.style.fontSize = '0.9rem';
+    sizeSpan.innerText = m.size_gb ? `Tamaño: ${m.size_gb} GB` : 'Calculando tamaño exacto...';
+    document.getElementById('modalModelDesc').after(sizeSpan);
+    
+    if (!m.size_gb) {
+        fetch(`/models/size/${encodeURIComponent(m.id)}`).then(r => r.json()).then(d => {
+            if (d.size_gb) {
+                m.size_gb = d.size_gb;
+                sizeSpan.innerText = `Tamaño exacto: ${d.size_gb} GB`;
+            } else {
+                sizeSpan.innerText = `Tamaño exacto desconocido`;
+            }
+        }).catch(() => sizeSpan.innerText = '');
+    }
+
     const dlBtn = document.getElementById('modalDownloadBtn');
     if (m.is_downloaded) {
         dlBtn.innerText = "🧠 Cargar local";
@@ -736,8 +924,19 @@ async function confirmDownload() {
         const data = await res.json();
         showToast("Descarga iniciada", "info");
         state.downloading[currentModalModel.id] = true;
+        document.getElementById('dlCancelBtn').style.display = 'inline-block';
         // Conectar SSE para progress en tiempo real
         listenDownloadProgress(currentModalModel.id);
+    } catch (e) { showToast(e.message, "error"); }
+}
+
+async function cancelDownload() {
+    if (!currentModalModel) return;
+    try {
+        await fetch(`/models/download/cancel?model_id=${encodeURIComponent(currentModalModel.id)}`, { method: 'POST' });
+        showToast("Cancelando descarga...", "info");
+        document.getElementById('dlCancelBtn').style.display = 'none';
+        delete state.downloading[currentModalModel.id];
     } catch (e) { showToast(e.message, "error"); }
 }
 
