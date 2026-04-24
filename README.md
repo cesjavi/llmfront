@@ -11,7 +11,7 @@
 
 | Feature | Description |
 |---|---|
-| ☁️ **Cloud (API) mode** | Chat with any model via HuggingFace Inference API — no GPU needed |
+| ☁️ **Cloud (API) mode** | Chat with any model via HuggingFace Inference API, Groq or OpenRouter |
 | 💻 **Local mode** | Download model weights and run inference on your own CPU/GPU |
 | 🔀 **Hybrid mode** (`both`) | Use API and local inference simultaneously from the same UI |
 | 🔍 **Model Explorer** | Search HuggingFace Hub with filters for task, size (≤3.5B / 4–9B / ≥10B) |
@@ -72,7 +72,7 @@ Open at: `http://localhost:8000`
 
 ```env
 # Operation mode:
-#   "api"   → Cloud only. HF Inference API + Groq. No torch. ~100 MB RAM.
+#   "api"   → Cloud only. HF Inference API + Groq + OpenRouter. No torch. ~100 MB RAM.
 #   "local" → Local only. Downloads + transformers inference. High RAM.
 #   "both"  → Hybrid: enables local AND cloud simultaneously.
 LLMFRONT_MODE=both
@@ -83,7 +83,7 @@ GROQ_AI_SEARCH_ENABLED=true
 # HuggingFace token — needed for gated models and API inference
 HF_TOKEN=hf_your_token_here
 
-# Groq API key — used for AI-assisted model search
+# Groq API key — used for AI-assisted model search and Groq API inference
 GROQ_API_KEY=gsk_your_groq_api_key_here
 ```
 
@@ -113,7 +113,7 @@ llmfront/
 - Minimal RAM (~100 MB). No `torch` or `transformers` required.
 - Install with `requirements-api.txt`.
 - Use the **☁️ API** toggle in the chat header.
-- Limited to models available on the HuggingFace Inference API.
+- Compatible with HuggingFace Inference API, Groq, and OpenRouter.
 
 ### `LLMFRONT_MODE=local` — Local only
 - Downloads model weights to `./models_cache/`.
@@ -140,15 +140,17 @@ When loading models locally, three precision modes are available:
 
 ---
 
-## 🤖 Ollama-Compatible Endpoints
+## 🤖 Local API Endpoints (Ollama & OpenAI Compatible)
 
-LLMFront exposes local-model endpoints that mimic the Ollama API:
+LLMFront exposes local-model endpoints that mimic both the Ollama API and OpenAI API:
 
-| Endpoint | Description |
-|---|---|
-| `GET /api/tags` | List downloaded models |
-| `POST /api/chat` | Chat (streaming or full) |
-| `POST /api/generate` | Generate (streaming or full) |
+| Endpoint | Format | Description |
+|---|---|---|
+| `GET /api/tags` | Ollama | List downloaded models |
+| `POST /api/chat` | Ollama | Chat (streaming or full) |
+| `POST /api/generate` | Ollama | Generate (streaming or full) |
+| `GET /v1/models` | OpenAI | List downloaded models |
+| `POST /v1/chat/completions` | OpenAI | Chat completions (streaming or full) |
 
 These endpoints are only available when `LOCAL_MODE` is enabled (`local` or `both`).
 
@@ -234,7 +236,7 @@ If Twinny shows "Connection Error" and you see **no activity** in the Python con
 The watchfiles reloader is configured to ignore `models_cache/` — if it's restarting on downloads, verify `reload_excludes=["models_cache", "venv"]` is present in `main.py`.
 
 **GGUF / tflite / mobile format errors:**
-LLMFront uses `transformers` for local inference. It only supports `.safetensors` / `.bin` formats. Avoid GGUF models (those need llama.cpp/Ollama instead).
+LLMFront uses `transformers` for local inference. It officially supports `.safetensors`, `.bin`, and `.gguf` formats. If you face issues with a specific GGUF model, try downloading the equivalent safetensors format instead.
 
 **Model not available in Inference API:**
 Not all HuggingFace models are served by the free Inference API. If you see `❌ Modelo no soportado por la Inference API`, download the model locally or choose a different one.

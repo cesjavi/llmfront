@@ -13,6 +13,7 @@ Variables clave en .env:
 
 import os
 import json
+import re
 import shutil
 import asyncio
 import logging
@@ -28,7 +29,7 @@ import threading
 import ctypes
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from huggingface_hub import InferenceClient, snapshot_download
@@ -314,11 +315,13 @@ def _system_info() -> dict:
 
 # ─── Hilo de descarga ─────────────────────────────────────────────────────────
 
-class DownloadCancelled(Exception): pass
+class DownloadCancelled(Exception):
+    pass
 
 def _async_raise(tid, exctype):
     res = ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(tid), ctypes.py_object(exctype))
-    if res == 0: raise ValueError("invalid thread id")
+    if res == 0:
+        raise ValueError("invalid thread id")
     elif res != 1:
         ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(tid), None)
         raise SystemError("PyThreadState_SetAsyncExc failed")
@@ -495,10 +498,12 @@ def _load_model_thread(model_id: str, quantization: str, device: str):
             selected_gguf = gguf_files[0]
             if quantization == "4bit":
                 q4_files = [f for f in gguf_files if "q4" in f.name.lower()]
-                if q4_files: selected_gguf = q4_files[0]
+                if q4_files:
+                    selected_gguf = q4_files[0]
             elif quantization == "8bit":
                 q8_files = [f for f in gguf_files if "q8" in f.name.lower()]
-                if q8_files: selected_gguf = q8_files[0]
+                if q8_files:
+                    selected_gguf = q8_files[0]
             gguf_kwargs["gguf_file"] = selected_gguf.name
             logger.info(f"Detectado modelo GGUF: usando archivo {selected_gguf.name}")
 
@@ -655,13 +660,14 @@ async def get_featured_models():
     return {"models": models}
 
 
-import re
 def _guess_size_b(name: str, tags: list) -> float:
     for tag in tags:
         m = re.search(r'(?i)(\d+(?:\.\d+)?)b', tag)
-        if m: return float(m.group(1))
+        if m:
+            return float(m.group(1))
     m = re.search(r'(?i)[_-](\d+(?:\.\d+)?)b[_-]', name)
-    if m: return float(m.group(1))
+    if m:
+        return float(m.group(1))
     return -1
 
 
@@ -762,9 +768,12 @@ async def search_models(req: ModelSearchRequest):
             if req.size_filter != "any":
                 size_b = _guess_size_b(mid, tags)
                 if size_b > 0:
-                    if req.size_filter == "small" and size_b > 3.5: continue
-                    if req.size_filter == "medium" and (size_b <= 3.5 or size_b >= 9.5): continue
-                    if req.size_filter == "large" and size_b < 9.5: continue
+                    if req.size_filter == "small" and size_b > 3.5:
+                        continue
+                    if req.size_filter == "medium" and (size_b <= 3.5 or size_b >= 9.5):
+                        continue
+                    if req.size_filter == "large" and size_b < 9.5:
+                        continue
 
             models.append({
                 "id": mid,
@@ -1088,6 +1097,39 @@ async def stream_hf_api(req: ChatRequest) -> AsyncGenerator[str, None]:
     except Exception as e:
         logger.error(f"Error in stream_hf_api: {e}")
         msg = str(e)
+        
+        # Fallback a generación de imágenes si la API no soporta "conversational"
+        if "conversational" in msg.lower() or "text-generation" in msg.lower() or "task" in msg.lower() or "text2text-generation" in msg.lower():
+            try:
+                prompt = ""
+                for m in reversed(messages):
+                    if m["role"] == "user":
+                        if isinstance(m["content"], list):
+                            for p in m["content"]:
+                                if isinstance(p, dict) and p.get("type") == "text":
+                                    prompt = p.get("text", "")
+                                    break
+                        else:
+                            prompt = str(m["content"])
+                        break
+                if not prompt: prompt = "A random image"
+                
+                logger.info(f"Intentando fallback a text_to_image con prompt: {prompt}")
+                img = client.text_to_image(prompt, model=req.model)
+                import base64
+                from io import BytesIO
+                buffered = BytesIO()
+                img.save(buffered, format="JPEG")
+                img_str = base64.b64encode(buffered.getvalue()).decode()
+                
+                md_image = f"![Generada por {req.model}](data:image/jpeg;base64,{img_str})\n"
+                yield f"data: {json.dumps({'token': md_image})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'tokens': {'prompt': 0, 'completion': 0}})}\n\n"
+                return
+            except Exception as img_err:
+                logger.error(f"Fallback to image failed: {img_err}")
+                pass # Continuar con los errores normales
+                
         if "403" in msg or "401" in msg:
             msg = "Token inválido o sin acceso al modelo."
         elif "404" in msg:
@@ -1095,7 +1137,7 @@ async def stream_hf_api(req: ChatRequest) -> AsyncGenerator[str, None]:
         elif "503" in msg or "loading" in msg.lower():
             msg = "El modelo está cargando en HF. Intentá en unos segundos."
         elif "not supported" in msg.lower():
-            msg = "Modelo no soportado por la Inference API. Usá el modo Local."
+            msg = "El modelo es de un tipo no soportado para chat. Intenta con un LLM válido."
         yield f"data: {json.dumps({'error': msg})}\n\n"
 
 async def stream_openai_compatible_api(req: ChatRequest) -> AsyncGenerator[str, None]:
@@ -1155,7 +1197,10 @@ async def stream_openai_compatible_api(req: ChatRequest) -> AsyncGenerator[str, 
         yield f"data: {json.dumps({'done': True, 'tokens': {'prompt': prompt_tokens, 'completion': completion_tokens}})}\n\n"
     except Exception as e:
         logger.error(f"Error in stream_openai_compatible_api: {e}")
-        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        msg = str(e)
+        if "not a chat model" in msg.lower():
+            msg = "❌ Este proveedor indica que el modelo no es para chat. Si es un modelo de imagen, cambiá el proveedor a '☁️ HF API' e intentá de nuevo."
+        yield f"data: {json.dumps({'error': msg})}\n\n"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1466,6 +1511,18 @@ async def _ollama_stream(generator, is_chat=True, model_name=""):
                 }) + "\n"
 
 if LOCAL_MODE:
+    async def _consume_ollama_stream(generator):
+        full_text = ""
+        async for chunk in generator:
+            if chunk.startswith("data: "):
+                try:
+                    data = json.loads(chunk[6:])
+                    if "token" in data:
+                        full_text += data["token"]
+                except Exception:
+                    pass
+        return full_text
+
     @app.post("/api/chat")
     async def ollama_chat(req: dict):
         """Ollama API: Chat (Robust version)"""
@@ -1489,13 +1546,7 @@ if LOCAL_MODE:
         if stream:
             return StreamingResponse(_ollama_stream(generator, True, model_id), media_type="application/x-ndjson")
         else:
-            full_text = ""
-            async for chunk in generator:
-                if chunk.startswith("data: "):
-                    try:
-                        data = json.loads(chunk[6:])
-                        if "token" in data: full_text += data["token"]
-                    except: pass
+            full_text = await _consume_ollama_stream(generator)
             return {
                 "model": model_id,
                 "created_at": datetime.now().isoformat() + "Z",
@@ -1529,13 +1580,7 @@ if LOCAL_MODE:
         if stream:
             return StreamingResponse(_ollama_stream(generator, False, model_id), media_type="application/x-ndjson")
         else:
-            full_text = ""
-            async for chunk in generator:
-                if chunk.startswith("data: "):
-                    try:
-                        data = json.loads(chunk[6:])
-                        if "token" in data: full_text += data["token"]
-                    except: pass
+            full_text = await _consume_ollama_stream(generator)
             return {
                 "model": model_id,
                 "created_at": datetime.now().isoformat() + "Z",

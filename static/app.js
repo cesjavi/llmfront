@@ -52,6 +52,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Paste images from clipboard (Ctrl+V)
     document.addEventListener('paste', handlePaste);
+
+    // Live update from canvas editor
+    document.getElementById('canvasCodeEditor').addEventListener('input', function() {
+        const iframe = document.getElementById('canvasIframe');
+        iframe.srcdoc = this.value;
+    });
 });
 
 // ─── CORE CHAT ───
@@ -274,7 +280,7 @@ function formatMarkdown(text) {
             const l = lang || 'texto';
             const cleanLang = l.toLowerCase();
             const isRenderable = ['html', 'svg', 'xml', 'react', 'javascript', 'js', 'css'].includes(cleanLang);
-            const renderBtn = isRenderable ? `<button class="copy-code-btn" onclick="openCanvas(this, '${cleanLang}')" style="color:var(--accent-hf); margin-left:8px; font-weight:bold;">✨ Renderizar</button>` : '';
+            const renderBtn = isRenderable ? `<button class="copy-code-btn" onclick="openCanvas(this)" style="color:var(--accent-hf); margin-left:8px; font-weight:bold;">✨ Renderizar</button>` : '';
             return `<div class="code-block-wrapper"><div class="code-header"><span class="code-lang">${l}</span><div><button class="copy-code-btn" onclick="copyCode(this)">Copiar</button>${renderBtn}</div></div><pre><code>${code}</code></pre></div>`;
         })
         .replace(/`([^`]+)`/g, '<code>$1</code>')
@@ -322,27 +328,77 @@ function copyCanvasCode() {
     });
 }
 
-function openCanvas(btn, lang) {
-    const codeEl = btn.parentElement.parentElement.nextElementSibling.querySelector('code');
-    if (!codeEl) return;
+function openCanvas(btn) {
+    const messageDiv = btn.closest('.message');
+    if (!messageDiv) return;
     
-    // codeEl.innerText is already unescaped by the browser
-    let code = codeEl.innerText;
+    // Find all code blocks in this message
+    const blocks = Array.from(messageDiv.querySelectorAll('.code-block-wrapper'));
     
-    document.getElementById('canvasCodeEditor').value = code;
-    document.getElementById('canvasTitleText').innerText = `Preview (${lang})`;
+    let htmlCode = '';
+    let cssCode = '';
+    let jsCode = '';
+    let svgCode = '';
+    
+    blocks.forEach(block => {
+        const langSpan = block.querySelector('.code-lang');
+        if (!langSpan) return;
+        const lang = langSpan.innerText.toLowerCase();
+        const code = block.querySelector('code').textContent;
+        
+        if (lang === 'html') htmlCode = code;
+        else if (lang === 'css') cssCode = code;
+        else if (lang === 'js' || lang === 'javascript') jsCode = code;
+        else if (lang === 'svg') svgCode = code;
+    });
+    
+    let finalCode = '';
+    
+    // Combine blocks if HTML is present
+    if (htmlCode) {
+        finalCode = htmlCode;
+        if (cssCode) {
+            if (finalCode.includes('</head>')) {
+                finalCode = finalCode.replace('</head>', `<style>\n${cssCode}\n</style>\n</head>`);
+            } else {
+                finalCode = `<style>\n${cssCode}\n</style>\n` + finalCode;
+            }
+        }
+        if (jsCode) {
+            if (finalCode.includes('</body>')) {
+                finalCode = finalCode.replace('</body>', `<script>\n${jsCode}\n</script>\n</body>`);
+            } else {
+                finalCode += `\n<script>\n${jsCode}\n</script>`;
+            }
+        }
+    } else if (svgCode) {
+        finalCode = `<!DOCTYPE html><html><body style="display:flex;justify-content:center;align-items:center;height:100vh;margin:0;">${svgCode}</body></html>`;
+    } else if (jsCode && !htmlCode && !cssCode) {
+        finalCode = `<!DOCTYPE html><html><body><script>\n${jsCode}\n</script></body></html>`;
+    } else {
+        // Fallback to the block clicked
+        const clickedBlock = btn.closest('.code-block-wrapper');
+        const lang = clickedBlock.querySelector('.code-lang').innerText.toLowerCase();
+        const code = clickedBlock.querySelector('code').textContent;
+        
+        if (lang === 'css') {
+            finalCode = `<!DOCTYPE html><html><head><style>${code}</style></head><body><h1>Preview CSS</h1></body></html>`;
+        } else {
+            finalCode = code;
+        }
+    }
+    
+    const editor = document.getElementById('canvasCodeEditor');
+    editor.value = finalCode;
+    document.getElementById('canvasTitleText').innerText = `Preview Canvas`;
     
     const iframe = document.getElementById('canvasIframe');
     
-    if (lang === 'svg') {
-        const svgHtml = `<!DOCTYPE html><html><body style="display:flex;justify-content:center;align-items:center;height:100vh;margin:0;">${code}</body></html>`;
-        iframe.srcdoc = svgHtml;
-    } else if (lang === 'js' || lang === 'javascript') {
-        const jsHtml = `<!DOCTYPE html><html><body><script>${code}</script></body></html>`;
-        iframe.srcdoc = jsHtml;
-    } else {
-        iframe.srcdoc = code;
-    }
+    // Forzar actualización recreando el srcdoc
+    iframe.srcdoc = '';
+    setTimeout(() => {
+        iframe.srcdoc = finalCode;
+    }, 10);
     
     switchCanvasTab('preview');
     toggleCanvas(true);
