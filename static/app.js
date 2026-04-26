@@ -70,6 +70,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('changeModelBtn').addEventListener('click', () => switchView('models'));
     document.getElementById('newChatBtn').addEventListener('click', clearChat);
     loadFeaturedModels();
+    loadTrendingModels();
     updateHardwareInfo();
     setInterval(updateHardwareInfo, 10000);
     setInterval(checkDownloadsProgress, 2000);
@@ -838,6 +839,23 @@ async function loadFeaturedModels() {
     } catch (e) { console.error(e); }
 }
 
+async function loadTrendingModels() {
+    const grid = document.getElementById('trendingModelsGrid');
+    grid.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><span>Cargando tendencias...</span></div>';
+    try {
+        const res = await fetch('/models/trending');
+        const data = await res.json();
+        if (data.models) {
+            renderModels(data.models, 'trendingModelsGrid');
+        } else {
+            grid.innerHTML = '<div class="local-empty">No se pudieron cargar las tendencias.</div>';
+        }
+    } catch (e) { 
+        console.error(e);
+        grid.innerHTML = '<div class="local-empty">Error cargando tendencias.</div>';
+    }
+}
+
 async function loadLocalModels() {
     try {
         const res = await fetch('/models/local');
@@ -1505,9 +1523,11 @@ function toggleSidebar() {
 
 /**** EXPORT/CLEAR ****/
 function clearChat() {
-    if (confirm("¿Limpiar historial de chat?")) {
+    if (confirm("¿Limpiar historial de chat y documentos?")) {
         state.messages = [];
+        clearPendingFiles();
         renderMessages();
+        fetch('/rag/clear', { method: 'POST' }).catch(console.error);
     }
 }
 

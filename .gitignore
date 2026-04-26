@@ -15,3 +15,6 @@ __pycache__/
 
 # Mac / Linux
 .DS_Store
+debug_rag.txt
+rag_log.txt
+rag_index.pkl

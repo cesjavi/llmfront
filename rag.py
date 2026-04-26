@@ -1,11 +1,15 @@
 import uuid
 import logging
 import math
+import os
+import pickle
 from collections import Counter
 from io import BytesIO
 import pypdf
 
 logger = logging.getLogger(__name__)
+
+INDEX_PATH = "rag_index.pkl"
 
 # --- Pure Python TF-IDF / BM25 Implementation ---
 class SimpleBM25:
@@ -60,10 +64,14 @@ class SimpleBM25:
             scores[i] = score
             
         top_indices = sorted(range(self.corpus_size), key=lambda i: scores[i], reverse=True)[:top_k]
+        
+        # Fallback: if all scores are 0, just take the first few chunks
+        if max(scores) == 0 and self.corpus_size > 0:
+            top_indices = list(range(min(self.corpus_size, top_k)))
+            
         results = []
         for i in top_indices:
-            if scores[i] > 0:
-                results.append((self.documents[i], self.metadatas[i], scores[i]))
+            results.append((self.documents[i], self.metadatas[i], scores[i]))
         return results
 
     def count(self):
@@ -72,7 +80,33 @@ class SimpleBM25:
 RAG_ENABLED = True
 collection = SimpleBM25()
 
+def save_index():
+    try:
+        with open(INDEX_PATH, "wb") as f:
+            pickle.dump(collection, f)
+        with open("rag_log.txt", "a", encoding="utf-8") as l:
+            l.write(f"Index saved. Size: {collection.count()} chunks.\n")
+    except Exception as e:
+        logger.error(f"Error saving RAG index: {e}")
+
+def load_index():
+    global collection
+    if os.path.exists(INDEX_PATH):
+        try:
+            with open(INDEX_PATH, "rb") as f:
+                collection = pickle.load(f)
+                logger.info(f"RAG index loaded: {collection.count()} chunks.")
+                with open("rag_log.txt", "a", encoding="utf-8") as l:
+                    l.write(f"Index loaded. Size: {collection.count()} chunks.\n")
+        except Exception as e:
+            logger.error(f"Error loading RAG index: {e}")
+
+# Load on module import
+load_index()
+
 def extract_text_from_file(filename: str, content: bytes) -> str:
+    with open("rag_log.txt", "a", encoding="utf-8") as l:
+        l.write(f"Extracting text from: {filename} ({len(content)} bytes)\n")
     ext = filename.split('.')[-1].lower()
     if ext == 'pdf':
         try:
@@ -116,11 +150,11 @@ def process_and_store_document(filename: str, content: bytes) -> dict:
         
     doc_id = str(uuid.uuid4())
     chunks = chunk_text(text, chunk_size=1500, overlap=300)
-    
     metadatas = [{"source": filename, "doc_id": doc_id, "chunk_index": i} for i in range(len(chunks))]
     
     try:
         collection.add_documents(chunks, metadatas)
+        save_index() # Persist to disk
         return {
             "doc_id": doc_id,
             "filename": filename,
@@ -131,11 +165,15 @@ def process_and_store_document(filename: str, content: bytes) -> dict:
         return {"error": str(e)}
 
 def query_rag_context(query: str, n_results: int = 3) -> str:
+    with open("rag_log.txt", "a", encoding="utf-8") as l:
+        l.write(f"Querying RAG: '{query}' (Index size: {collection.count()})\n")
     if not RAG_ENABLED or collection.count() == 0:
         return ""
         
     try:
         results = collection.search(query, top_k=n_results)
+        with open("rag_log.txt", "a", encoding="utf-8") as l:
+            l.write(f"Search results: {len(results)} found.\n")
         if results:
             context_pieces = []
             for doc, meta, score in results:

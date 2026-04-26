@@ -704,6 +704,37 @@ async def get_featured_models():
     return {"models": models}
 
 
+@app.get("/models/trending")
+async def get_trending_models():
+    """Fetch top trending models from Hugging Face Hub."""
+    try:
+        from huggingface_hub import list_models
+        # Fetch top 10 trending text-generation models
+        hf_models = list_models(sort="trending", limit=10, filter="text-generation", cardData=True)
+        
+        models = []
+        for m in hf_models:
+            model_id = m.modelId
+            entry = {
+                "id": model_id,
+                "name": model_id.split('/')[-1].replace('-', ' ').title(),
+                "description": f"Modelo tendencia en Hugging Face. Creado por {model_id.split('/')[0]}.",
+                "tags": getattr(m, 'tags', [])[:4],
+                "likes": getattr(m, 'likes', 0),
+                "is_downloaded": _is_downloaded(model_id),
+                "is_partial": _is_partial(model_id),
+                "is_trending": True
+            }
+            # Try to guess size or get from siblings
+            entry["size_gb"] = -1 # Default unknown
+            models.append(entry)
+            
+        return {"models": models}
+    except Exception as e:
+        logger.error(f"Error fetching trending models: {e}")
+        return {"models": [], "error": str(e)}
+
+
 def _guess_size_b(name: str, tags: list) -> float:
     for tag in tags:
         m = re.search(r'(?i)(\d+(?:\.\d+)?)b', tag)
@@ -2037,8 +2068,15 @@ async def chat_stream(req: ChatRequest):
             if isinstance(last_msg, str):
                 context = rag.query_rag_context(last_msg, n_results=3)
                 if context:
-                    augmented = f"Información de contexto adicional extraída de los documentos del usuario:\n{context}\n\nResponde a la siguiente instrucción del usuario (si la información de contexto es útil, usala. De lo contrario, ignorala):\n{last_msg}"
-                    req.messages[-1].content = augmented
+                    rag_info = f"\n\n[CONTEXTO DE DOCUMENTOS ADJUNTOS]\n{context}\n[FIN DEL CONTEXTO]\n"
+                    if req.system_prompt:
+                        req.system_prompt += rag_info
+                    else:
+                        req.system_prompt = f"Eres un asistente que tiene acceso a documentos adjuntos. {rag_info}"
+                    
+                    # Debug
+                    with open("debug_rag.txt", "w", encoding="utf-8") as f:
+                        f.write(f"System Prompt: {req.system_prompt}\nUser Msg: {last_msg}")
     
     if req.use_local or req.provider == "local":
         generator = stream_local(req)
@@ -2060,12 +2098,23 @@ async def chat_stream(req: ChatRequest):
 @app.post("/rag/upload")
 async def upload_rag_document(file: UploadFile = File(...)):
     """Sube un documento y lo procesa para RAG usando ChromaDB."""
+    print(f"DEBUG: /rag/upload reached for {file.filename}")
     content = await file.read()
     result = rag.process_and_store_document(file.filename, content)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
+
+@app.post("/rag/clear")
+async def clear_rag_index():
+    """Limpia el índice de documentos en memoria y disco."""
+    if hasattr(rag, 'collection'):
+        rag.collection = rag.SimpleBM25()
+        if os.path.exists(rag.INDEX_PATH):
+            os.remove(rag.INDEX_PATH)
+        return {"status": "success", "message": "Índice RAG limpiado."}
+    return {"status": "error", "message": "RAG no disponible."}
 
 @app.post("/chat/complete")
 async def chat_complete(req: ChatRequest):
@@ -2409,7 +2458,7 @@ if __name__ == "__main__":
     import time
 
     host = os.getenv("HOST", "127.0.0.1")
-    port = int(os.getenv("PORT", 11434))
+    port = int(os.getenv("PORT", 8000))
     
     def open_browser():
         time.sleep(1.5)
