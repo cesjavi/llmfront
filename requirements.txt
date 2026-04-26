@@ -17,3 +17,5 @@ protobuf>=3.20.0        # Necesario para cargar tokenizers de ciertos modelos (e
 sentencepiece>=0.1.99   # Requerido por tokenizers lentos de ciertos LLMs
 tiktoken>=0.7.0         # Requerido para modelos basados en BPE como Llama 3 o Qwen
 gguf>=0.6.0             # Necesario para que transformers cargue tokenizers desde archivos GGUF
+chromadb>=0.4.0         # Para RAG local con base de datos vectorial
+pypdf>=4.0.0            # Para procesar PDFs en RAG

@@ -72,12 +72,20 @@
         <option value="hf">Hugging Face</option>
         <option value="groq">Groq</option>
         <option value="openrouter">OpenRouter</option>
+        <option value="together">Together AI</option>
+        <option value="deepinfra">DeepInfra</option>
+        <option value="fireworks">Fireworks AI</option>
+        <option value="baseten">Baseten</option>
       </select>
     </div>
     <div class="token-input-wrap">
       <input type="password" id="hfTokenInput" class="token-input" placeholder="hf_..." />
       <input type="password" id="groqTokenInput" class="token-input" placeholder="gsk_..." style="display:none;" />
       <input type="password" id="openrouterTokenInput" class="token-input" placeholder="sk-or-v1-..." style="display:none;" />
+      <input type="password" id="togetherTokenInput" class="token-input" placeholder="Together API key" style="display:none;" />
+      <input type="password" id="deepinfraTokenInput" class="token-input" placeholder="DeepInfra token" style="display:none;" />
+      <input type="password" id="fireworksTokenInput" class="token-input" placeholder="Fireworks API key" style="display:none;" />
+      <input type="password" id="basetenTokenInput" class="token-input" placeholder="Baseten API key" style="display:none;" />
       <button class="change-model-btn token-save-btn" id="saveTokenBtn" title="Guardar token">💾</button>
     </div>
     <div class="token-hint" id="tokenHint">Necesario para modo API. <a href="https://huggingface.co/settings/tokens" target="_blank">Obtener token</a></div>
@@ -111,6 +119,10 @@
           <option value="hf">☁️ HF API</option>
           <option value="groq">⚡ Groq</option>
           <option value="openrouter">🌐 OpenRouter</option>
+          <option value="together">🧩 Together</option>
+          <option value="deepinfra">🛰️ DeepInfra</option>
+          <option value="fireworks">🎆 Fireworks</option>
+          <option value="baseten">🏗️ Baseten</option>
         </select>
         <button class="mode-btn" id="modeLocalBtn" onclick="setMode('local')">
           💻 Local
@@ -149,7 +161,7 @@
     <div class="input-area">
       <div class="input-row">
         <div class="textarea-wrap">
-          <input type="file" id="imageInput" accept="image/*" multiple hidden />
+          <input type="file" id="fileInput" accept="image/*,.pdf,.txt,.csv,.md,.py,.js" multiple hidden />
           <div class="image-attachment" id="imageAttachment" style="display:none"></div>
           <textarea
             id="userInput"
@@ -162,7 +174,7 @@
           </div>
         </div>
         <div class="input-btns">
-            <button class="attach-btn" id="attachImageBtn" onclick="triggerImagePicker()" title="Adjuntar imagen" style="display:none">
+            <button class="attach-btn" id="attachBtn" onclick="triggerFilePicker()" title="Adjuntar archivo o imagen" style="display:inline-block">
               <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             </button>
             <button class="attach-btn" id="cameraBtn" onclick="toggleCameraModal()" title="Tomar foto" style="display:none">
@@ -211,6 +223,21 @@
           <button class="preset-btn" onclick="document.getElementById('systemPrompt').value='Eres un asistente experto, útil y preciso. Responde siempre en Español.'; if(window.changeAppLanguage) { changeAppLanguage('es'); document.getElementById('appLangSelect').value='es'; }">🇦🇷 Español</button>
           <button class="preset-btn" onclick="document.getElementById('systemPrompt').value='You are a helpful, expert and precise AI assistant. Always respond in English.'; if(window.changeAppLanguage) { changeAppLanguage('en'); document.getElementById('appLangSelect').value='en'; }">🇺🇸 English</button>
         </div>
+
+        <div class="config-card-header" style="margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px;">
+          <div class="config-card-title">🔌 Proveedor API</div>
+          <span class="config-badge">Inferencia cloud</span>
+        </div>
+        <select id="configProviderSelect" class="task-filter" style="width:100%;" onchange="setProvider(this.value)">
+          <option value="hf">☁️ HF API</option>
+          <option value="groq">⚡ Groq</option>
+          <option value="openrouter">🌐 OpenRouter</option>
+          <option value="together">🧩 Together</option>
+          <option value="deepinfra">🛰️ DeepInfra</option>
+          <option value="fireworks">🎆 Fireworks</option>
+          <option value="baseten">🏗️ Baseten</option>
+        </select>
+        <div class="config-hint" style="margin-top: 8px">Este selector se sincroniza con el chat y con el buscador de modelos.</div>
       </div>
 
       <!-- Temperatura -->
@@ -331,6 +358,15 @@
           <option value="medium">🖥️ RAM/GPU: Mediano (4B-9B)</option>
           <option value="large">🚀 RAM/GPU: Grande (≥10B)</option>
         </select>
+        <select id="searchProviderFilter" class="task-filter" onchange="syncSearchProvider()">
+          <option value="hf">☁️ HF API</option>
+          <option value="groq">⚡ Groq</option>
+          <option value="openrouter">🌐 OpenRouter</option>
+          <option value="together">🧩 Together</option>
+          <option value="deepinfra">🛰️ DeepInfra</option>
+          <option value="fireworks">🎆 Fireworks</option>
+          <option value="baseten">🏗️ Baseten</option>
+        </select>
         <button class="search-btn" onclick="searchModels()">
           <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           Buscar
@@ -412,6 +448,7 @@
     <div class="modal-tags" id="modalModelTags"></div>
     <p class="modal-capability" id="modalModelCapability"></p>
     <p class="modal-desc" id="modalModelDesc"></p>
+    <div class="modal-meta-grid" id="modalMetaGrid"></div>
     <div class="modal-actions">
       <button onclick="closeModal()" class="modal-cancel-btn">Cancelar</button>
       <button onclick="startDownloadFromModal()" class="modal-download-btn" id="modalDownloadBtn">

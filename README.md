@@ -1,9 +1,13 @@
-# LLMFront 🤗
+# LLMFront v0.9.1 🤗
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 
 **LLMFront** is a unified, self-hosted web interface to explore, download, and chat with open-source LLMs — both via the **HuggingFace Inference API (cloud)** and **fully offline on your own hardware** using `transformers`.
+
+Current version: `0.9.1`
+
+See the change history in [CHANGELOG.md](/mnt/d/sistemas/llmfront/CHANGELOG.md).
 
 ---
 

@@ -1036,6 +1036,41 @@ textarea#userInput::placeholder { color: var(--text-muted); }
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.m-api-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 7px 9px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.03);
+}
+.m-api-status.pending,
+.m-api-status.unknown {
+  border-color: rgba(255, 157, 0, 0.18);
+  background: rgba(255, 157, 0, 0.08);
+}
+.m-api-status.available {
+  border-color: rgba(74, 222, 128, 0.24);
+  background: rgba(74, 222, 128, 0.09);
+}
+.m-api-status.unavailable {
+  border-color: rgba(248, 113, 113, 0.28);
+  background: rgba(248, 113, 113, 0.08);
+}
+.m-api-status-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.m-api-status-value {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
 
 .model-tags {
   display: flex;
@@ -1073,6 +1108,28 @@ textarea#userInput::placeholder { color: var(--text-muted); }
   font-size: 12px;
   color: #ffb347;
   font-weight: 700;
+}
+.m-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+.model-details-btn {
+  border: 1px solid rgba(255, 157, 0, 0.25);
+  background: rgba(255, 157, 0, 0.08);
+  color: #ffd089;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 7px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+.model-details-btn:hover {
+  background: rgba(255, 157, 0, 0.16);
+  border-color: rgba(255, 157, 0, 0.45);
+  color: #fff0c8;
+  transform: translateY(-1px);
 }
 
 /* Loading spinner */
@@ -1142,6 +1199,35 @@ textarea#userInput::placeholder { color: var(--text-muted); }
   margin-bottom: 10px;
 }
 .modal-desc { font-size: 13px; color: var(--text-secondary); line-height: 1.6; margin-bottom: 20px; }
+.modal-meta-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.modal-meta-card {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+.modal-meta-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 5px;
+}
+.modal-meta-value {
+  display: block;
+  font-size: 12px;
+  color: var(--text-primary);
+  line-height: 1.4;
+  word-break: break-word;
+}
 .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
 
 .modal-cancel-btn {

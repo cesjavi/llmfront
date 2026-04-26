@@ -27,13 +27,14 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 import threading
 import ctypes
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from huggingface_hub import InferenceClient, snapshot_download
 import requests
+import rag
 
 os.environ.setdefault("USE_TF", "0")
 os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
@@ -44,12 +45,18 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+APP_VERSION = "0.9"
+
 # ─── Configuración de modo ────────────────────────────────────────────────────
 LLMFRONT_MODE = os.getenv("LLMFRONT_MODE", "local").lower()
 LOCAL_MODE = LLMFRONT_MODE in ("local", "both")
 GROQ_AI_SEARCH_ENABLED = os.getenv("GROQ_AI_SEARCH_ENABLED", "true").lower() in ("1", "true", "yes")
 
 HF_TOKEN = os.getenv("HF_TOKEN", "")
+TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY", "")
+DEEPINFRA_API_KEY = os.getenv("DEEPINFRA_API_KEY", "")
+FIREWORKS_API_KEY = os.getenv("FIREWORKS_API_KEY", "")
+BASETEN_API_KEY = os.getenv("BASETEN_API_KEY", "")
 MODELS_CACHE_DIR = Path("./models_cache")
 if LOCAL_MODE:
     MODELS_CACHE_DIR.mkdir(exist_ok=True)
@@ -67,7 +74,7 @@ elif GROQ_AI_SEARCH_ENABLED:
 else:
     logger.info("🔍 Búsqueda IA (Groq): DESHABILITADA")
 
-app = FastAPI(title="LLMFront", description="HuggingFace LLM Chat Frontend", version="2.0.0")
+app = FastAPI(title="LLMFront", description="HuggingFace LLM Chat Frontend", version=APP_VERSION)
 
 app.add_middleware(
     CORSMiddleware,
@@ -87,7 +94,7 @@ async def log_requests(request: Request, call_next):
     response = await call_next(request)
     return response
 
-@app.get("/")
+@app.get("/healthz")
 async def root_health():
     return {"status": "ok", "app": "LLMFront", "ollama_compat": True}
 
@@ -131,7 +138,15 @@ class ModelSearchRequest(BaseModel):
     size_filter: str = "any"
     limit: int = 20
     hf_token: Optional[str] = None
+    provider: str = "hf"
+    api_key: Optional[str] = None
     use_ai_search: bool = False
+
+class ModelApiCheckRequest(BaseModel):
+    model_id: str
+    provider: str = "hf"
+    api_key: Optional[str] = None
+    hf_token: Optional[str] = None
     
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
@@ -291,6 +306,29 @@ def _get_loaded_model_key() -> Optional[str]:
         if _loaded_models:
             return next(iter(_loaded_models))
     return None
+
+def _short_model_alias(model_id_or_key: str) -> str:
+    """Genera un alias corto consistente para IDs remotos y keys locales."""
+    normalized = model_id_or_key.replace("--", "/")
+    return normalized.split("/")[-1].split("-")[0].lower()
+
+def _release_loaded_resources(data: dict) -> None:
+    """Libera el modelo y limpia cachés de CPU/GPU."""
+    try:
+        import gc
+        import torch
+
+        if "model" in data:
+            del data["model"]
+        if "tokenizer" in data:
+            del data["tokenizer"]
+        if "processor" in data:
+            del data["processor"]
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+    except Exception:
+        pass
 
 def _system_info() -> dict:
     """Info básica de hardware."""
@@ -619,7 +657,7 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "2.0.0", "mode": LLMFRONT_MODE, "local_support": LOCAL_MODE}
+    return {"status": "ok", "version": APP_VERSION, "mode": LLMFRONT_MODE, "local_support": LOCAL_MODE}
 
 
 @app.get("/config")
@@ -630,6 +668,12 @@ async def get_config():
         "local_mode": LOCAL_MODE,
         "groq_ai_search_enabled": GROQ_AI_SEARCH_ENABLED and bool(GROQ_API_KEY),
         "groq_available": bool(GROQ_API_KEY),
+        "hf_available": bool(HF_TOKEN),
+        "openrouter_available": bool(os.getenv("OPENROUTER_API_KEY", "")),
+        "together_available": bool(TOGETHER_API_KEY),
+        "deepinfra_available": bool(DEEPINFRA_API_KEY),
+        "fireworks_available": bool(FIREWORKS_API_KEY),
+        "baseten_available": bool(BASETEN_API_KEY),
     }
 
 
@@ -707,6 +751,484 @@ def _read_local_config(local_dir: Path) -> dict:
     except Exception:
         return {}
 
+def _matches_query(query: str, *values: str) -> bool:
+    if not query.strip():
+        return True
+    haystack = " ".join(v for v in values if v).lower()
+    terms = [t for t in re.split(r"\s+", query.lower().strip()) if t]
+    return all(term in haystack for term in terms)
+
+def _passes_size_filter(model_id: str, tags: list, size_filter: str) -> bool:
+    if size_filter == "any":
+        return True
+    size_b = _guess_size_b(model_id, tags)
+    if size_b <= 0:
+        return True
+    if size_filter == "small":
+        return size_b <= 3.5
+    if size_filter == "medium":
+        return 3.5 < size_b < 9.5
+    if size_filter == "large":
+        return size_b >= 9.5
+    return True
+
+def _provider_search_result(
+    model_id: str,
+    name: str,
+    description: str = "",
+    tags: Optional[list] = None,
+    likes: int = 0,
+    downloads: int = 0,
+    pipeline_tag: str = "",
+    extra_meta: Optional[dict] = None,
+) -> dict:
+    tags = tags or []
+    extra_meta = extra_meta or {}
+    meta = _extract_model_meta(
+        model_id,
+        tags=tags,
+        pipeline_tag=pipeline_tag,
+        description=description,
+        config=extra_meta,
+    )
+    return {
+        "id": model_id,
+        "name": name or model_id,
+        "description": description,
+        "tags": tags[:6],
+        "likes": likes,
+        "downloads": downloads,
+        "pipeline_tag": pipeline_tag,
+        "is_downloaded": _is_downloaded(model_id),
+        "is_partial": _is_partial(model_id),
+        **meta,
+    }
+
+def _search_openrouter_models(query: str, size_filter: str, limit: int) -> tuple[list, str]:
+    resp = requests.get("https://openrouter.ai/api/v1/models", timeout=20)
+    resp.raise_for_status()
+    data = resp.json().get("data", [])
+    models = []
+    for item in data:
+        model_id = item.get("id", "")
+        name = item.get("name") or item.get("canonical_slug") or model_id
+        description = item.get("description", "") or ""
+        architecture = item.get("architecture", {}) or {}
+        modality = architecture.get("modality", "") or ""
+        input_modalities = architecture.get("input_modalities", []) or []
+        tags = [t for t in [modality, *input_modalities] if t]
+        if not _matches_query(query, model_id, name, description, " ".join(tags)):
+            continue
+        if not _passes_size_filter(model_id, tags, size_filter):
+            continue
+        models.append(_provider_search_result(
+            model_id=model_id,
+            name=name,
+            description=description,
+            tags=tags,
+            pipeline_tag="conversational",
+        ))
+        if len(models) >= limit:
+            break
+    return models, "openrouter"
+
+def _search_together_models(query: str, size_filter: str, limit: int, api_key: str) -> tuple[list, str]:
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Together AI requiere API key para listar modelos.")
+    resp = requests.get(
+        "https://api.together.xyz/v1/models",
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    models = []
+    for item in data:
+        model_id = item.get("id", "")
+        name = item.get("display_name") or model_id
+        description = f"Tipo: {item.get('type', 'unknown')}"
+        tags = [item.get("type", "")]
+        if item.get("organization"):
+            tags.append(item["organization"])
+        if item.get("context_length"):
+            tags.append(f"{item['context_length']}ctx")
+        if not _matches_query(query, model_id, name, description, " ".join(tags)):
+            continue
+        if not _passes_size_filter(model_id, tags, size_filter):
+            continue
+        models.append(_provider_search_result(
+            model_id=model_id,
+            name=name,
+            description=description,
+            tags=tags,
+            pipeline_tag="conversational" if item.get("type") == "chat" else "text-generation",
+        ))
+        if len(models) >= limit:
+            break
+
+    # Probe exact query if it looks like a full model ID
+    if query and "/" in query and not any(m["id"] == query for m in models):
+        try:
+            probe = requests.post(
+                "https://api.together.xyz/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": query, "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 1},
+                timeout=10,
+            )
+            if probe.ok:
+                models.insert(0, _provider_search_result(
+                    model_id=query,
+                    name=query.split("/")[-1],
+                    description="Custom Model (Probed via direct API call)",
+                    tags=["custom", "together"],
+                    pipeline_tag="conversational",
+                ))
+        except Exception:
+            pass
+
+    return models, "together"
+
+def _search_fireworks_models(query: str, size_filter: str, limit: int, api_key: str) -> tuple[list, str]:
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Fireworks AI requiere API key para listar modelos.")
+    resp = requests.get(
+        "https://api.fireworks.ai/v1/accounts/fireworks/models",
+        headers={"Authorization": f"Bearer {api_key}"},
+        params={"filter": "supports_serverless=true", "pageSize": min(limit * 3, 200)},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    data = resp.json().get("models", [])
+    models = []
+
+    def _is_invocable_fireworks_model(model_id: str) -> bool:
+        try:
+            probe = requests.post(
+                "https://api.fireworks.ai/inference/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "max_tokens": 1,
+                    "temperature": 0.0,
+                    "stream": False,
+                },
+                timeout=12,
+            )
+            return probe.ok
+        except Exception:
+            return False
+
+    for item in data:
+        status = item.get("status", {}) or {}
+        if status.get("code") and status.get("code") != "OK":
+            continue
+        if item.get("supportsServerless") is False:
+            continue
+        model_id = item.get("name", "")
+        name = item.get("displayName") or model_id
+        description = item.get("description", "") or ""
+        base = item.get("baseModelDetails", {}) or {}
+        tags = [t for t in [base.get("modelType", ""), base.get("parameterCount", "")] if t]
+        model_type = (base.get("modelType", "") or "").lower()
+        if any(term in model_type for term in ["embed", "rerank", "audio", "vision"]):
+            continue
+        if item.get("huggingFaceUrl"):
+            tags.append("huggingface")
+        if not _matches_query(query, model_id, name, description, " ".join(tags)):
+            continue
+        if not _passes_size_filter(model_id, tags, size_filter):
+            continue
+        if not _is_invocable_fireworks_model(model_id):
+            continue
+        models.append(_provider_search_result(
+            model_id=model_id,
+            name=name,
+            description=description,
+            tags=tags,
+            pipeline_tag="conversational",
+            extra_meta={"model_type": base.get("modelType", "")},
+        ))
+        if len(models) >= limit:
+            break
+            
+    # Probe exact query if it looks like a full model ID
+    if query and "/" in query and not any(m["id"] == query for m in models):
+        if _is_invocable_fireworks_model(query):
+            models.insert(0, _provider_search_result(
+                model_id=query,
+                name=query.split("/")[-1],
+                description="Custom Model (Probed via direct API call)",
+                tags=["custom", "fireworks"],
+                pipeline_tag="conversational",
+            ))
+
+    return models, "fireworks"
+
+def _search_baseten_models(query: str, size_filter: str, limit: int, api_key: str) -> tuple[list, str]:
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Baseten requiere API key para listar modelos.")
+    resp = requests.get(
+        "https://inference.baseten.co/v1/models",
+        headers={"Authorization": f"Api-Key {api_key}"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    data = payload.get("data") or payload.get("models") or []
+    models = []
+    for item in data:
+        model_id = item.get("id", "")
+        name = item.get("name") or model_id
+        description = item.get("description", "") or ""
+        tags = []
+        architecture = item.get("architecture", {}) or {}
+        if architecture.get("modality"):
+            tags.append(architecture["modality"])
+        if item.get("top_provider"):
+            tags.append(item["top_provider"].get("name", ""))
+        if item.get("context_length"):
+            tags.append(f"{item['context_length']}ctx")
+        if not _matches_query(query, model_id, name, description, " ".join(tags)):
+            continue
+        if not _passes_size_filter(model_id, tags, size_filter):
+            continue
+        models.append(_provider_search_result(
+            model_id=model_id,
+            name=name,
+            description=description,
+            tags=tags,
+            pipeline_tag="conversational",
+        ))
+        if len(models) >= limit:
+            break
+
+    # Probe exact query if it looks like a full model ID
+    if query and not any(m["id"] == query for m in models):
+        try:
+            probe = requests.post(
+                "https://inference.baseten.co/v1/chat/completions",
+                headers={"Authorization": f"Api-Key {api_key}", "Content-Type": "application/json"},
+                json={"model": query, "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 1},
+                timeout=10,
+            )
+            if probe.ok:
+                models.insert(0, _provider_search_result(
+                    model_id=query,
+                    name=query,
+                    description="Custom Model (Probed via direct API call)",
+                    tags=["custom", "baseten"],
+                    pipeline_tag="conversational",
+                ))
+        except Exception:
+            pass
+
+    return models, "baseten"
+
+def _check_hf_api_availability(model_id: str, token: str) -> dict:
+    if not token:
+        return {
+            "status": "unknown",
+            "label": "Sin verificar",
+            "mode": None,
+            "detail": "Se necesita un HF Token para comprobar compatibilidad API.",
+        }
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    def _classify_probe_response(resp) -> tuple[str, str]:
+        text = (resp.text or "")[:280]
+        lowered = text.lower()
+        if resp.ok:
+            return "available", text
+        if any(term in lowered for term in [
+            "not a chat model",
+            "model_not_supported",
+            "not supported",
+            "unsupported",
+            "text-generation is not supported",
+        ]):
+            return "unsupported", text
+        if resp.status_code in (401, 403):
+            return "auth", text
+        if resp.status_code in (408, 409, 424, 425, 429, 500, 502, 503, 504):
+            return "transient", text
+        return "unknown", text
+
+    chat_url = f"https://api-inference.huggingface.co/models/{model_id}/v1/chat/completions"
+    try:
+        resp = requests.post(
+            chat_url,
+            headers=headers,
+            json={
+                "model": model_id,
+                "messages": [{"role": "user", "content": "Hola"}],
+                "max_tokens": 1,
+                "stream": False,
+                "temperature": 0.1,
+            },
+            timeout=20,
+        )
+        chat_status, chat_error = _classify_probe_response(resp)
+        if chat_status == "available":
+            return {
+                "status": "available",
+                "label": "Disponible",
+                "mode": "chat",
+                "detail": "HF responde por chat completions.",
+            }
+    except Exception as e:
+        chat_status = "unknown"
+        chat_error = str(e)
+
+    text_url = f"https://api-inference.huggingface.co/models/{model_id}"
+    try:
+        resp = requests.post(
+            text_url,
+            headers=headers,
+            json={
+                "inputs": "Hola",
+                "parameters": {
+                    "max_new_tokens": 1,
+                    "return_full_text": False,
+                    "temperature": 0.1,
+                },
+                "options": {
+                    "wait_for_model": False,
+                    "use_cache": False,
+                },
+            },
+            timeout=20,
+        )
+        text_status, text_error = _classify_probe_response(resp)
+        if text_status == "available":
+            return {
+                "status": "available",
+                "label": "Disponible",
+                "mode": "text-generation",
+                "detail": "HF responde por text-generation.",
+            }
+    except Exception as e:
+        text_status = "unknown"
+        text_error = str(e)
+
+    if chat_status == "auth" or text_status == "auth":
+        return {
+            "status": "unknown",
+            "label": "Sin verificar",
+            "mode": None,
+            "detail": "Token inválido o sin permisos para comprobar compatibilidad API.",
+        }
+
+    if chat_status == "unsupported" and text_status == "unsupported":
+        return {
+            "status": "unavailable",
+            "label": "No disponible",
+            "mode": None,
+            "detail": text_error or chat_error or "HF no expone este modelo en la Inference API actual.",
+        }
+
+    if chat_status == "unsupported":
+        return {
+            "status": "available",
+            "label": "Disponible",
+            "mode": "text-generation",
+            "detail": "No responde por chat, pero podria funcionar por text-generation o por fallback.",
+        }
+
+    if text_status == "unsupported":
+        return {
+            "status": "available",
+            "label": "Disponible",
+            "mode": "chat",
+            "detail": "No responde por text-generation, pero podria funcionar por chat completions.",
+        }
+
+    return {
+        "status": "unknown",
+        "label": "Sin verificar",
+        "mode": None,
+        "detail": text_error or chat_error or "No se pudo confirmar la compatibilidad API en este momento.",
+    }
+
+def _check_openai_provider_model_availability(provider: str, model_id: str, api_key: str) -> dict:
+    base_urls = {
+        "groq": "https://api.groq.com/openai/v1",
+        "openrouter": "https://openrouter.ai/api/v1",
+        "together": "https://api.together.xyz/v1",
+        "deepinfra": "https://api.deepinfra.com/v1/openai",
+        "fireworks": "https://api.fireworks.ai/inference/v1",
+        "baseten": "https://inference.baseten.co/v1",
+    }
+    base_url = base_urls.get(provider)
+    if not api_key or not base_url:
+        return {
+            "status": "unknown",
+            "label": "Sin verificar",
+            "mode": None,
+            "detail": f"No hay suficiente informacion para verificar {provider.upper()}.",
+        }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}" if provider != "baseten" else f"Api-Key {api_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        resp = requests.post(
+            f"{base_url}/chat/completions",
+            headers=headers,
+            json={
+                "model": model_id,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 1,
+                "temperature": 0.0,
+                "stream": False,
+            },
+            timeout=15,
+        )
+        msg = (resp.text or "")[:280]
+        lowered = msg.lower()
+        if resp.ok:
+            return {
+                "status": "available",
+                "label": "Disponible",
+                "mode": "chat",
+                "detail": f"{provider.upper()} responde por chat completions.",
+            }
+        if "model_not_found" in lowered or "does not exist" in lowered or "not found" in lowered:
+            return {
+                "status": "unavailable",
+                "label": "No disponible",
+                "mode": None,
+                "detail": f"{provider.upper()} no reconoce este model id para chat.",
+            }
+        if "embedding" in lowered or "not a chat model" in lowered or "not supported" in lowered:
+            return {
+                "status": "unavailable",
+                "label": "No disponible",
+                "mode": None,
+                "detail": f"{provider.upper()} indica que el modelo no es apto para chat.",
+            }
+        return {
+            "status": "unknown",
+            "label": "Sin verificar",
+            "mode": None,
+            "detail": msg or f"No se pudo confirmar compatibilidad de {provider.upper()} en este momento.",
+        }
+    except Exception as e:
+        return {
+            "status": "unknown",
+            "label": "Sin verificar",
+            "mode": None,
+            "detail": str(e),
+        }
+
 @app.post("/models/search")
 async def search_models(req: ModelSearchRequest):
     token = req.hf_token or HF_TOKEN
@@ -744,7 +1266,35 @@ async def search_models(req: ModelSearchRequest):
         except Exception as e:
             logger.warning(f"Groq AI Search failed, falling back to standard: {e}")
 
+    provider = (req.provider or "hf").lower()
+    provider_api_keys = {
+        "groq": GROQ_API_KEY,
+        "openrouter": os.getenv("OPENROUTER_API_KEY", ""),
+        "together": TOGETHER_API_KEY,
+        "deepinfra": DEEPINFRA_API_KEY,
+        "fireworks": FIREWORKS_API_KEY,
+        "baseten": BASETEN_API_KEY,
+    }
+    effective_api_key = req.api_key or provider_api_keys.get(provider, "")
+
     try:
+        if provider == "openrouter":
+            models, source = _search_openrouter_models(search_query, req.size_filter, req.limit)
+            return {"models": models, "total": len(models), "source": source}
+        if provider == "together":
+            models, source = _search_together_models(search_query, req.size_filter, req.limit, effective_api_key)
+            return {"models": models, "total": len(models), "source": source}
+        if provider == "fireworks":
+            models, source = _search_fireworks_models(search_query, req.size_filter, req.limit, effective_api_key)
+            return {"models": models, "total": len(models), "source": source}
+        if provider == "baseten":
+            models, source = _search_baseten_models(search_query, req.size_filter, req.limit, effective_api_key)
+            return {"models": models, "total": len(models), "source": source}
+
+        source = "huggingface"
+        if provider == "deepinfra":
+            source = "huggingface-fallback-for-deepinfra"
+
         headers = {}
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -765,15 +1315,8 @@ async def search_models(req: ModelSearchRequest):
                 description=description,
             )
             
-            if req.size_filter != "any":
-                size_b = _guess_size_b(mid, tags)
-                if size_b > 0:
-                    if req.size_filter == "small" and size_b > 3.5:
-                        continue
-                    if req.size_filter == "medium" and (size_b <= 3.5 or size_b >= 9.5):
-                        continue
-                    if req.size_filter == "large" and size_b < 9.5:
-                        continue
+            if not _passes_size_filter(mid, tags, req.size_filter):
+                continue
 
             models.append({
                 "id": mid,
@@ -789,7 +1332,7 @@ async def search_models(req: ModelSearchRequest):
             })
             if len(models) >= req.limit:
                 break
-        return {"models": models, "total": len(models)}
+        return {"models": models, "total": len(models), "source": source}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -806,6 +1349,24 @@ async def get_model_size(model_id: str):
         return {"size_gb": None}
     except Exception:
         return {"size_gb": None}
+
+@app.post("/models/api-check")
+async def check_model_api(req: ModelApiCheckRequest):
+    provider = (req.provider or "hf").lower()
+    if provider == "hf":
+        token = req.hf_token or HF_TOKEN
+        return _check_hf_api_availability(req.model_id, token)
+
+    env_api_keys = {
+        "groq": GROQ_API_KEY,
+        "openrouter": os.getenv("OPENROUTER_API_KEY", ""),
+        "together": TOGETHER_API_KEY,
+        "deepinfra": DEEPINFRA_API_KEY,
+        "fireworks": FIREWORKS_API_KEY,
+        "baseten": BASETEN_API_KEY,
+    }
+    effective_api_key = req.api_key or env_api_keys.get(provider, "")
+    return _check_openai_provider_model_availability(provider, req.model_id, effective_api_key)
 
 
 
@@ -854,16 +1415,21 @@ if LOCAL_MODE:
 
         is_partial = _is_partial(req.model_id)
         size_saved = _dir_size_gb(_model_local_dir(req.model_id)) if is_partial else 0
-        if is_partial:
-            logger.info(f"Resuming partial download: {req.model_id} ({size_saved} GB saved)")
-            with _download_lock:
-                _download_state[key] = {
-                    "status": "downloading",
-                    "progress": 0,
-                    "message": f"Reanudando descarga ({size_saved} GB ya guardados)...",
-                    "model_id": req.model_id,
-                    "size_saved_gb": size_saved,
-                }
+        with _download_lock:
+            _download_state[key] = {
+                "status": "downloading",
+                "progress": 0,
+                "message": (
+                    f"Reanudando descarga ({size_saved} GB ya guardados)..."
+                    if is_partial else
+                    "Iniciando descarga..."
+                ),
+                "model_id": req.model_id,
+                "thread_id": None,
+            }
+            if is_partial:
+                _download_state[key]["size_saved_gb"] = size_saved
+                logger.info(f"Resuming partial download: {req.model_id} ({size_saved} GB saved)")
 
         token = req.hf_token or HF_TOKEN
         
@@ -976,19 +1542,7 @@ if LOCAL_MODE:
             if _loaded_models:
                 old_key = next(iter(_loaded_models))
                 old_data = _loaded_models.pop(old_key)
-                try:
-                    import torch
-                    import gc
-                    del old_data["model"]
-                    if "tokenizer" in old_data:
-                        del old_data["tokenizer"]
-                    if "processor" in old_data:
-                        del old_data["processor"]
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    gc.collect()
-                except Exception:
-                    pass
+                _release_loaded_resources(old_data)
                 logger.info(f"Unloaded previous model: {old_key}")
 
         t = Thread(target=_load_model_thread, args=(req.model_id, req.quantization, req.device), daemon=True)
@@ -1005,20 +1559,7 @@ if LOCAL_MODE:
             if key not in _loaded_models:
                 return {"status": "not_loaded"}
             data = _loaded_models.pop(key)
-        try:
-            import torch
-            import gc
-            if "model" in data:
-                del data["model"]
-            if "tokenizer" in data:
-                del data["tokenizer"]
-            if "processor" in data:
-                del data["processor"]
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
-        except Exception:
-            pass
+        _release_loaded_resources(data)
         return {"status": "unloaded", "model_id": model_id}
 
 
@@ -1075,6 +1616,34 @@ async def stream_hf_api(req: ChatRequest) -> AsyncGenerator[str, None]:
         else:
             messages.append({"role": msg.role, "content": msg.content})
 
+    def _plain_text_prompt() -> str:
+        parts = []
+        if req.system_prompt:
+            parts.append(f"[SYSTEM]\n{req.system_prompt}")
+        for msg in req.messages:
+            if msg.role == "user":
+                parts.append(f"[USER]\n{msg.content}")
+            elif msg.role == "assistant":
+                parts.append(f"[ASSISTANT]\n{msg.content}")
+            else:
+                parts.append(f"[{msg.role.upper()}]\n{msg.content}")
+        parts.append("[ASSISTANT]\n")
+        return "\n\n".join(parts)
+
+    def _extract_hf_chunk_text(data: dict) -> str:
+        choices = data.get("choices") or []
+        if not choices:
+            return ""
+        choice = choices[0] or {}
+        delta = choice.get("delta") or {}
+        message = choice.get("message") or {}
+        return (
+            delta.get("content")
+            or choice.get("text")
+            or message.get("content")
+            or ""
+        )
+
     try:
         prompt_tokens = len(str(messages)) // 4
         completion_tokens = 0
@@ -1097,6 +1666,83 @@ async def stream_hf_api(req: ChatRequest) -> AsyncGenerator[str, None]:
     except Exception as e:
         logger.error(f"Error in stream_hf_api: {e}")
         msg = str(e)
+
+        if "not a chat model" in msg.lower() or "model_not_supported" in msg.lower():
+            try:
+                prompt_tokens = len(str(messages)) // 4
+                completion_tokens = 0
+                hf_resp = requests.post(
+                    f"https://api-inference.huggingface.co/models/{req.model}/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": req.model,
+                        "messages": messages,
+                        "max_tokens": req.max_new_tokens,
+                        "temperature": req.temperature,
+                        "top_p": req.top_p,
+                        "stream": True,
+                    },
+                    stream=True,
+                    timeout=60,
+                )
+                hf_resp.raise_for_status()
+
+                for raw_line in hf_resp.iter_lines():
+                    if not raw_line:
+                        continue
+                    line = raw_line.decode("utf-8", errors="ignore").strip()
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:]
+                    if payload == "[DONE]":
+                        break
+                    data = json.loads(payload)
+                    token_text = _extract_hf_chunk_text(data)
+                    if token_text:
+                        completion_tokens += 1
+                        yield f"data: {json.dumps({'token': token_text})}\n\n"
+                    await asyncio.sleep(0)
+
+                logger.info(
+                    f"HF raw /v1/chat/completions fallback done. Prompt: {prompt_tokens}, Comp: {completion_tokens}"
+                )
+                yield f"data: {json.dumps({'done': True, 'tokens': {'prompt': prompt_tokens, 'completion': completion_tokens}})}\n\n"
+                return
+            except Exception as raw_chat_err:
+                logger.error(f"Fallback to raw HF chat endpoint failed: {raw_chat_err}")
+                msg = str(raw_chat_err)
+
+        if ("not a chat model" in msg.lower() or "model_not_supported" in msg.lower()) and not req.images:
+            try:
+                prompt = _plain_text_prompt()
+                prompt_tokens = len(prompt) // 4
+                completion_tokens = 0
+                stream = client.text_generation(
+                    prompt,
+                    model=req.model,
+                    max_new_tokens=req.max_new_tokens,
+                    temperature=req.temperature,
+                    top_p=req.top_p,
+                    stream=True,
+                )
+                for chunk in stream:
+                    token_text = chunk if isinstance(chunk, str) else getattr(chunk, "token", None)
+                    if hasattr(token_text, "text"):
+                        token_text = token_text.text
+                    if token_text:
+                        completion_tokens += 1
+                        yield f"data: {json.dumps({'token': token_text})}\n\n"
+                    await asyncio.sleep(0)
+
+                logger.info(f"HF text_generation fallback done. Prompt: {prompt_tokens}, Comp: {completion_tokens}")
+                yield f"data: {json.dumps({'done': True, 'tokens': {'prompt': prompt_tokens, 'completion': completion_tokens}})}\n\n"
+                return
+            except Exception as gen_err:
+                logger.error(f"Fallback to text_generation failed: {gen_err}")
+                msg = str(gen_err)
         
         # Fallback a generación de imágenes si la API no soporta "conversational"
         if "conversational" in msg.lower() or "text-generation" in msg.lower() or "task" in msg.lower() or "text2text-generation" in msg.lower():
@@ -1136,25 +1782,49 @@ async def stream_hf_api(req: ChatRequest) -> AsyncGenerator[str, None]:
             msg = "Modelo no disponible en Inference API. Intentá descargarlo localmente."
         elif "503" in msg or "loading" in msg.lower():
             msg = "El modelo está cargando en HF. Intentá en unos segundos."
+        elif "not a chat model" in msg.lower() or "model_not_supported" in msg.lower():
+            msg = (
+                "Hugging Face no expone este modelo como chat en Inference API. "
+                "Probá usarlo en modo local o elegí otro proveedor/modelo."
+            )
+        elif "text-generation" in msg.lower() and "not supported" in msg.lower():
+            msg = (
+                "Hugging Face no expone este modelo ni como chat ni como text-generation "
+                "en Inference API. Probá usarlo en modo local."
+            )
         elif "not supported" in msg.lower():
-            msg = "El modelo es de un tipo no soportado para chat. Intenta con un LLM válido."
+            msg = f"Este modelo no está soportado por la Inference API en este modo. Detalle: {msg}"
         yield f"data: {json.dumps({'error': msg})}\n\n"
 
 async def stream_openai_compatible_api(req: ChatRequest) -> AsyncGenerator[str, None]:
-    if not req.api_key:
+    env_api_keys = {
+        "groq": GROQ_API_KEY,
+        "openrouter": os.getenv("OPENROUTER_API_KEY", ""),
+        "together": TOGETHER_API_KEY,
+        "deepinfra": DEEPINFRA_API_KEY,
+        "fireworks": FIREWORKS_API_KEY,
+        "baseten": BASETEN_API_KEY,
+    }
+    effective_api_key = req.api_key or env_api_keys.get(req.provider, "")
+
+    if not effective_api_key:
         yield f"data: {json.dumps({'error': f'Se necesita una API Key para usar {req.provider.upper()}.'})}\n\n"
         return
         
     base_urls = {
         "groq": "https://api.groq.com/openai/v1",
-        "openrouter": "https://openrouter.ai/api/v1"
+        "openrouter": "https://openrouter.ai/api/v1",
+        "together": "https://api.together.xyz/v1",
+        "deepinfra": "https://api.deepinfra.com/v1/openai",
+        "fireworks": "https://api.fireworks.ai/inference/v1",
+        "baseten": "https://inference.baseten.co/v1",
     }
     base_url = base_urls.get(req.provider)
     if not base_url:
         yield f"data: {json.dumps({'error': 'Proveedor no válido.'})}\n\n"
         return
 
-    client = AsyncOpenAI(api_key=req.api_key, base_url=base_url)
+    client = AsyncOpenAI(api_key=effective_api_key, base_url=base_url)
     messages = []
     if req.system_prompt:
         messages.append({"role": "system", "content": req.system_prompt})
@@ -1198,6 +1868,12 @@ async def stream_openai_compatible_api(req: ChatRequest) -> AsyncGenerator[str, 
     except Exception as e:
         logger.error(f"Error in stream_openai_compatible_api: {e}")
         msg = str(e)
+        if req.provider == "fireworks" and ("model_not_found" in msg.lower() or "does not exist" in msg.lower()):
+            msg = (
+                "Fireworks devolvio que ese modelo no existe para inferencia. "
+                "Puede pasar si el catalogo lista un modelo transitorio o no invocable por chat en este momento. "
+                "Probá otro modelo de Fireworks o volvé a buscar."
+            )
         if "not a chat model" in msg.lower():
             msg = "❌ Este proveedor indica que el modelo no es para chat. Si es un modelo de imagen, cambiá el proveedor a '☁️ HF API' e intentá de nuevo."
         yield f"data: {json.dumps({'error': msg})}\n\n"
@@ -1214,7 +1890,7 @@ async def stream_local(req: ChatRequest) -> AsyncGenerator[str, None]:
         # Búsqueda por alias corto
         if not model_data:
             for loaded_key, data in _loaded_models.items():
-                short_name = loaded_key.split("/")[-1].split("-")[0].lower()
+                short_name = _short_model_alias(loaded_key)
                 if short_name == key.lower():
                     model_data = data
                     break
@@ -1353,10 +2029,20 @@ async def chat_stream(req: ChatRequest):
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
+        
+    # Inject RAG context if applicable
+    if getattr(rag, 'RAG_ENABLED', False) and getattr(rag, 'collection', None) and rag.collection.count() > 0:
+        if req.messages and req.messages[-1].role == "user":
+            last_msg = req.messages[-1].content
+            if isinstance(last_msg, str):
+                context = rag.query_rag_context(last_msg, n_results=3)
+                if context:
+                    augmented = f"Información de contexto adicional extraída de los documentos del usuario:\n{context}\n\nResponde a la siguiente instrucción del usuario (si la información de contexto es útil, usala. De lo contrario, ignorala):\n{last_msg}"
+                    req.messages[-1].content = augmented
     
     if req.use_local or req.provider == "local":
         generator = stream_local(req)
-    elif req.provider in ["groq", "openrouter"]:
+    elif req.provider in ["groq", "openrouter", "together", "deepinfra", "fireworks", "baseten"]:
         generator = stream_openai_compatible_api(req)
     else:
         generator = stream_hf_api(req)
@@ -1370,6 +2056,15 @@ async def chat_stream(req: ChatRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+@app.post("/rag/upload")
+async def upload_rag_document(file: UploadFile = File(...)):
+    """Sube un documento y lo procesa para RAG usando ChromaDB."""
+    content = await file.read()
+    result = rag.process_and_store_document(file.filename, content)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 @app.post("/chat/complete")
@@ -1445,7 +2140,7 @@ if LOCAL_MODE:
                         }
                     })
                     # Alias corto (ej: smollm2)
-                    short_name = model_id.split("/")[-1].split("-")[0].lower()
+                    short_name = _short_model_alias(model_id)
                     if short_name and short_name != model_id:
                         models.append({
                             "name": short_name,
@@ -1724,4 +2419,3 @@ if __name__ == "__main__":
     threading.Thread(target=open_browser, daemon=True).start()
 
     uvicorn.run("main:app", host=host, port=port, reload=True, reload_excludes=["models_cache", "venv"])
-

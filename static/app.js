@@ -10,18 +10,61 @@ let state = {
     hfToken: localStorage.getItem('hf_token') || '',
     groqToken: localStorage.getItem('groq_token') || '',
     openrouterToken: localStorage.getItem('openrouter_token') || '',
-    provider: 'hf',
+    togetherToken: localStorage.getItem('together_token') || '',
+    deepinfraToken: localStorage.getItem('deepinfra_token') || '',
+    fireworksToken: localStorage.getItem('fireworks_token') || '',
+    basetenToken: localStorage.getItem('baseten_token') || '',
+    provider: localStorage.getItem('selected_provider') || 'hf',
+    searchProvider: localStorage.getItem('selected_provider') || 'hf',
+    apiChecks: {},
     systemInfo: null,
     downloading: {},
     quant: 'none',
     cameraStream: null
 };
 
+async function preloadConfigBackedProviders() {
+    try {
+        const res = await fetch('/config');
+        const cfg = await res.json();
+        const configMap = [
+            ['hfToken', 'hfTokenInput', cfg.hf_available],
+            ['groqToken', 'groqTokenInput', cfg.groq_available],
+            ['openrouterToken', 'openrouterTokenInput', cfg.openrouter_available],
+            ['togetherToken', 'togetherTokenInput', cfg.together_available],
+            ['deepinfraToken', 'deepinfraTokenInput', cfg.deepinfra_available],
+            ['fireworksToken', 'fireworksTokenInput', cfg.fireworks_available],
+            ['basetenToken', 'basetenTokenInput', cfg.baseten_available],
+        ];
+
+        configMap.forEach(([stateKey, inputId, available]) => {
+            const input = document.getElementById(inputId);
+            if (!input) return;
+            if (!state[stateKey] && available) {
+                input.placeholder = 'Configurada en .env';
+                input.dataset.fromEnv = 'true';
+            }
+        });
+    } catch (e) {
+        console.warn('No se pudo leer /config para precargar providers', e);
+    }
+}
+
 // ─── INIT ───
 document.addEventListener('DOMContentLoaded', () => {
     if (state.hfToken) document.getElementById('hfTokenInput').value = state.hfToken;
     if (state.groqToken) document.getElementById('groqTokenInput').value = state.groqToken;
     if (state.openrouterToken) document.getElementById('openrouterTokenInput').value = state.openrouterToken;
+    if (state.togetherToken) document.getElementById('togetherTokenInput').value = state.togetherToken;
+    if (state.deepinfraToken) document.getElementById('deepinfraTokenInput').value = state.deepinfraToken;
+    if (state.fireworksToken) document.getElementById('fireworksTokenInput').value = state.fireworksToken;
+    if (state.basetenToken) document.getElementById('basetenTokenInput').value = state.basetenToken;
+    updateTokenInputVisibility();
+    document.getElementById('searchProviderFilter').value = state.searchProvider;
+    document.getElementById('configProviderSelect').value = state.provider;
+    document.getElementById('chatProviderSelect').value = state.provider;
+    setProvider(state.provider);
+    preloadConfigBackedProviders();
     
     document.getElementById('saveTokenBtn').addEventListener('click', saveTokens);
     document.getElementById('changeModelBtn').addEventListener('click', () => switchView('models'));
@@ -48,7 +91,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // File input change
-    document.getElementById('imageInput').addEventListener('change', handleImageSelection);
+    document.getElementById('fileInput').addEventListener('change', handleFileSelection);
 
     // Paste images from clipboard (Ctrl+V)
     document.addEventListener('paste', handlePaste);
@@ -78,7 +121,7 @@ async function sendMessage() {
     input.value = '';
     input.style.height = 'auto';
     const imagesToSend = [...state.pendingImages];
-    clearPendingImages();
+    clearPendingFiles();
     updateSendButton();
 
     // Placeholder for AI
@@ -95,6 +138,10 @@ async function sendMessage() {
     let currentKey = state.hfToken;
     if (state.provider === 'groq') currentKey = state.groqToken;
     if (state.provider === 'openrouter') currentKey = state.openrouterToken;
+    if (state.provider === 'together') currentKey = state.togetherToken;
+    if (state.provider === 'deepinfra') currentKey = state.deepinfraToken;
+    if (state.provider === 'fireworks') currentKey = state.fireworksToken;
+    if (state.provider === 'baseten') currentKey = state.basetenToken;
 
     const payload = {
         model: state.activeModel.id,
@@ -408,30 +455,63 @@ function openCanvas(btn) {
 function getWelcomeHtml() {
     return `
         <div class="welcome-screen" id="welcomeScreen">
-          <div class="welcome-icon">ðŸ¤—</div>
+          <div class="welcome-icon">LLM</div>
           <h1 class="welcome-title">LLMFront</h1>
           <p class="welcome-sub">Chat con cualquier modelo de Hugging Face</p>
           <div class="welcome-steps">
-            <div class="step"><span class="step-num">1</span><span>IngresÃ¡ tu <strong>HF Token</strong> en la barra lateral</span></div>
-            <div class="step"><span class="step-num">2</span><span>SeleccionÃ¡ un <strong>modelo</strong> en la secciÃ³n Modelos</span></div>
-            <div class="step"><span class="step-num">3</span><span>ConfigurÃ¡ el <strong>contexto</strong> y parÃ¡metros a tu gusto</span></div>
-            <div class="step"><span class="step-num">4</span><span>Â¡EmpezÃ¡ a <strong>chatear</strong>!</span></div>
+            <div class="step"><span class="step-num">1</span><span>Ingresa tu <strong>HF Token</strong> en la barra lateral</span></div>
+            <div class="step"><span class="step-num">2</span><span>Selecciona un <strong>modelo</strong> en la seccion Modelos</span></div>
+            <div class="step"><span class="step-num">3</span><span>Configura el <strong>contexto</strong> y parametros a tu gusto</span></div>
+            <div class="step"><span class="step-num">4</span><span>Empieza a <strong>chatear</strong></span></div>
           </div>
         </div>
     `;
 }
 
-// ─── VISION & CAMERA ───
-function triggerImagePicker() {
-    document.getElementById('imageInput').click();
+// ─── VISION & RAG & CAMERA ───
+function triggerFilePicker() {
+    document.getElementById('fileInput').click();
 }
 
-async function handleImageSelection(e) {
+async function handleFileSelection(e) {
     const files = Array.from(e.target.files);
     for (const file of files) {
-        await processImageFile(file);
+        if (file.type.startsWith('image/')) {
+            if (!state.activeModel?.supports_vision) {
+                showToast(`El modelo ${state.activeModel?.id || ''} no soporta imágenes.`, 'error');
+                continue;
+            }
+            await processImageFile(file);
+        } else {
+            await processRagFile(file);
+        }
     }
     e.target.value = ''; // Reset for next selection
+}
+
+async function processRagFile(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    showToast(`Subiendo ${file.name}...`, 'info');
+    try {
+        const res = await fetch('/rag/upload', {
+            method: 'POST',
+            body: formData
+        });
+        if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.detail || 'Error subiendo archivo');
+        }
+        const data = await res.json();
+        state.pendingDocs = state.pendingDocs || [];
+        state.pendingDocs.push({ filename: file.name, doc_id: data.doc_id });
+        renderPendingFiles();
+        updateSendButton();
+        showToast(`Documento indexado: ${file.name}`, 'success');
+    } catch(err) {
+        showToast(err.message, 'error');
+    }
 }
 
 async function handlePaste(e) {
@@ -459,7 +539,7 @@ function processImageFile(file) {
         reader.onload = (e) => {
             const base64 = e.target.result.split(',')[1];
             state.pendingImages.push({ base64, mime_type: file.type });
-            renderPendingImages();
+            renderPendingFiles();
             updateSendButton();
             resolve();
         };
@@ -467,9 +547,12 @@ function processImageFile(file) {
     });
 }
 
-function renderPendingImages() {
+function renderPendingFiles() {
     const area = document.getElementById('imageAttachment');
-    if (state.pendingImages.length === 0) {
+    const hasImages = state.pendingImages && state.pendingImages.length > 0;
+    const hasDocs = state.pendingDocs && state.pendingDocs.length > 0;
+    
+    if (!hasImages && !hasDocs) {
         area.style.display = 'none';
         return;
     }
@@ -478,27 +561,57 @@ function renderPendingImages() {
     area.style.gap = '8px';
     area.innerHTML = '';
     
-    state.pendingImages.forEach((img, idx) => {
-        const wrap = document.createElement('div');
-        wrap.className = 'pending-img-wrap';
-        wrap.style.position = 'relative';
-        wrap.innerHTML = `
-            <img src="data:${img.mime_type};base64,${img.base64}" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:1px solid var(--border);" />
-            <button onclick="removePendingImage(${idx})" class="remove-img-btn" style="position:absolute;top:-5px;right:-5px;background:var(--danger);color:white;border:none;border-radius:50%;width:18px;height:18px;cursor:pointer;font-size:12px;line-height:18px;text-align:center;">×</button>
-        `;
-        area.appendChild(wrap);
-    });
+    if (hasImages) {
+        state.pendingImages.forEach((img, idx) => {
+            const wrap = document.createElement('div');
+            wrap.className = 'pending-img-wrap';
+            wrap.style.position = 'relative';
+            wrap.innerHTML = `
+                <img src="data:${img.mime_type};base64,${img.base64}" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:1px solid var(--border);" />
+                <button onclick="removePendingImage(${idx})" class="remove-img-btn" style="position:absolute;top:-5px;right:-5px;background:var(--danger);color:white;border:none;border-radius:50%;width:18px;height:18px;cursor:pointer;font-size:12px;line-height:18px;text-align:center;">×</button>
+            `;
+            area.appendChild(wrap);
+        });
+    }
+    
+    if (hasDocs) {
+        state.pendingDocs.forEach((doc, idx) => {
+            const wrap = document.createElement('div');
+            wrap.className = 'pending-doc-wrap';
+            wrap.style.position = 'relative';
+            wrap.style.background = 'var(--bg-secondary)';
+            wrap.style.padding = '8px 12px';
+            wrap.style.borderRadius = '8px';
+            wrap.style.border = '1px solid var(--border)';
+            wrap.style.display = 'flex';
+            wrap.style.alignItems = 'center';
+            wrap.style.gap = '6px';
+            wrap.innerHTML = `
+                <span>📄</span>
+                <span style="font-size:12px; max-width:100px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${doc.filename}</span>
+                <button onclick="removePendingDoc(${idx})" class="remove-img-btn" style="position:absolute;top:-5px;right:-5px;background:var(--danger);color:white;border:none;border-radius:50%;width:18px;height:18px;cursor:pointer;font-size:12px;line-height:18px;text-align:center;">×</button>
+            `;
+            area.appendChild(wrap);
+        });
+    }
 }
 
 function removePendingImage(idx) {
     state.pendingImages.splice(idx, 1);
-    renderPendingImages();
+    renderPendingFiles();
     updateSendButton();
 }
 
-function clearPendingImages() {
+function removePendingDoc(idx) {
+    state.pendingDocs.splice(idx, 1);
+    renderPendingFiles();
+    updateSendButton();
+}
+
+function clearPendingFiles() {
     state.pendingImages = [];
-    renderPendingImages();
+    state.pendingDocs = [];
+    renderPendingFiles();
 }
 
 // Camera controls
@@ -568,18 +681,36 @@ function updateTokenInputVisibility() {
     document.getElementById('hfTokenInput').style.display = p === 'hf' ? 'block' : 'none';
     document.getElementById('groqTokenInput').style.display = p === 'groq' ? 'block' : 'none';
     document.getElementById('openrouterTokenInput').style.display = p === 'openrouter' ? 'block' : 'none';
+    document.getElementById('togetherTokenInput').style.display = p === 'together' ? 'block' : 'none';
+    document.getElementById('deepinfraTokenInput').style.display = p === 'deepinfra' ? 'block' : 'none';
+    document.getElementById('fireworksTokenInput').style.display = p === 'fireworks' ? 'block' : 'none';
+    document.getElementById('basetenTokenInput').style.display = p === 'baseten' ? 'block' : 'none';
     
     // hint updates
     const hints = {
         'hf': 'Necesario para modo API. <a href="https://huggingface.co/settings/tokens" target="_blank">Obtener token</a>',
         'groq': 'Necesario para usar Groq. <a href="https://console.groq.com/keys" target="_blank">Obtener API Key</a>',
-        'openrouter': 'Necesario para usar OpenRouter. <a href="https://openrouter.ai/keys" target="_blank">Obtener API Key</a>'
+        'openrouter': 'Necesario para usar OpenRouter. <a href="https://openrouter.ai/keys" target="_blank">Obtener API Key</a>',
+        'together': 'Necesario para usar Together AI. <a href="https://api.together.xyz/settings/api-keys" target="_blank">Obtener API Key</a>',
+        'deepinfra': 'Necesario para usar DeepInfra. <a href="https://deepinfra.com/dash/api_keys" target="_blank">Obtener token</a>',
+        'fireworks': 'Necesario para usar Fireworks AI. <a href="https://fireworks.ai/account/api-keys" target="_blank">Obtener API Key</a>',
+        'baseten': 'Necesario para usar Baseten. <a href="https://app.baseten.co/settings/api_keys" target="_blank">Obtener API Key</a>'
     };
     document.getElementById('tokenHint').innerHTML = hints[p];
 }
 
 function setProvider(provider) {
     state.provider = provider;
+    localStorage.setItem('selected_provider', provider);
+    if (provider !== 'local') {
+        state.searchProvider = provider;
+        const searchProvider = document.getElementById('searchProviderFilter');
+        if (searchProvider) searchProvider.value = provider;
+        const chatProvider = document.getElementById('chatProviderSelect');
+        if (chatProvider) chatProvider.value = provider;
+        const configProvider = document.getElementById('configProviderSelect');
+        if (configProvider) configProvider.value = provider;
+    }
     if (provider === 'local') {
         state.isLocal = true;
         document.getElementById('modeLocalBtn').classList.add('active');
@@ -590,6 +721,12 @@ function setProvider(provider) {
         document.getElementById('footerMode').innerText = `API ☁️ (${provider})`;
     }
     updateVisionSupport();
+}
+
+function syncSearchProvider() {
+    const provider = document.getElementById('searchProviderFilter').value;
+    state.searchProvider = provider;
+    setProvider(provider);
 }
 
 function setMode(mode) {
@@ -612,10 +749,19 @@ function saveTokens() {
     state.hfToken = document.getElementById('hfTokenInput').value.trim();
     state.groqToken = document.getElementById('groqTokenInput').value.trim();
     state.openrouterToken = document.getElementById('openrouterTokenInput').value.trim();
+    state.togetherToken = document.getElementById('togetherTokenInput').value.trim();
+    state.deepinfraToken = document.getElementById('deepinfraTokenInput').value.trim();
+    state.fireworksToken = document.getElementById('fireworksTokenInput').value.trim();
+    state.basetenToken = document.getElementById('basetenTokenInput').value.trim();
+    state.apiChecks = {};
     
     localStorage.setItem('hf_token', state.hfToken);
     localStorage.setItem('groq_token', state.groqToken);
     localStorage.setItem('openrouter_token', state.openrouterToken);
+    localStorage.setItem('together_token', state.togetherToken);
+    localStorage.setItem('deepinfra_token', state.deepinfraToken);
+    localStorage.setItem('fireworks_token', state.fireworksToken);
+    localStorage.setItem('baseten_token', state.basetenToken);
     showToast("API Keys guardadas", "success");
 }
 
@@ -662,20 +808,21 @@ function updateSendButton() {
 }
 
 function updateVisionSupport() {
-    const btnAttach = document.getElementById('attachImageBtn');
+    const btnAttach = document.getElementById('attachBtn');
     const btnCamera = document.getElementById('cameraBtn');
     const hint = document.getElementById('visionHint');
     
     const supports = state.activeModel && state.activeModel.supports_vision;
     
+    // attachBtn (clip) stays visible because it also handles RAG documents
+    if (btnAttach) btnAttach.style.display = 'flex';
+
     if (supports) {
-        btnAttach.style.display = 'flex';
-        btnCamera.style.display = 'flex';
-        hint.style.display = 'block';
+        if (btnCamera) btnCamera.style.display = 'flex';
+        if (hint) hint.style.display = 'block';
     } else {
-        btnAttach.style.display = 'none';
-        btnCamera.style.display = 'none';
-        hint.style.display = 'none';
+        if (btnCamera) btnCamera.style.display = 'none';
+        if (hint) hint.style.display = 'none';
     }
 }
 
@@ -759,9 +906,13 @@ function renderLocalModelsList(data) {
 function renderModels(models, gridId) {
     const grid = document.getElementById(gridId);
     grid.innerHTML = '';
+    const provider = state.searchProvider || state.provider || 'hf';
+    const showApiStatus = gridId === 'searchModelsGrid';
     models.forEach(m => {
         const card = document.createElement('div');
         const tags = Array.isArray(m.tags) ? m.tags : [];
+        const cacheKey = `${provider}:${m.id}`;
+        const apiInfo = state.apiChecks[cacheKey] || null;
         card.className = `model-item ${state.activeModel?.id === m.id ? 'selected' : ''}`;
         card.onclick = () => showModelModal(m);
         card.innerHTML = `
@@ -777,17 +928,103 @@ function renderModels(models, gridId) {
                 ${m.is_downloaded ? '<span class="m-tag local-tag">💻 Local</span>' : ''}
             </div>
             <div class="m-desc">${m.description || 'Sin descripción'}</div>
+            ${showApiStatus ? `
+                <div class="m-api-status ${apiInfo ? apiInfo.status : 'pending'}">
+                    <span class="m-api-status-label">${provider.toUpperCase()}</span>
+                    <span class="m-api-status-value">${apiInfo ? apiInfo.label : 'Verificando...'}</span>
+                </div>
+            ` : ''}
             <div class="m-footer">
                 <span>⭐ ${m.likes}</span>
                 <span>${m.size_gb ? m.size_gb + ' GB' : ''}</span>
             </div>
+            <div class="m-actions">
+                <button class="model-details-btn" type="button">Ver detalles</button>
+            </div>
         `;
+        const detailsBtn = card.querySelector('.model-details-btn');
+        if (detailsBtn) {
+            detailsBtn.onclick = (event) => {
+                event.stopPropagation();
+                showModelModal(m);
+            };
+        }
         grid.appendChild(card);
     });
+
+    if (showApiStatus) {
+        enrichSearchResultApiStatus(models, provider);
+    }
+}
+
+function getProviderApiKey(provider) {
+    if (provider === 'groq') return state.groqToken;
+    if (provider === 'openrouter') return state.openrouterToken;
+    if (provider === 'together') return state.togetherToken;
+    if (provider === 'deepinfra') return state.deepinfraToken;
+    if (provider === 'fireworks') return state.fireworksToken;
+    if (provider === 'baseten') return state.basetenToken;
+    return state.hfToken;
+}
+
+async function fetchModelApiAvailability(modelId, provider) {
+    const cacheKey = `${provider}:${modelId}`;
+    if (state.apiChecks[cacheKey]) {
+        return state.apiChecks[cacheKey];
+    }
+
+    try {
+        const res = await fetch('/models/api-check', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model_id: modelId,
+                provider,
+                api_key: provider === 'hf' ? null : getProviderApiKey(provider),
+                hf_token: state.hfToken || null
+            })
+        });
+        const data = await res.json();
+        state.apiChecks[cacheKey] = data;
+        return data;
+    } catch (e) {
+        const fallback = {
+            status: 'unknown',
+            label: 'Sin verificar',
+            mode: null,
+            detail: 'No se pudo comprobar la API en este momento.'
+        };
+        state.apiChecks[cacheKey] = fallback;
+        return fallback;
+    }
+}
+
+async function enrichSearchResultApiStatus(models, provider) {
+    const grid = document.getElementById('searchModelsGrid');
+    if (!grid) return;
+
+    for (const m of models) {
+        const info = await fetchModelApiAvailability(m.id, provider);
+        const card = Array.from(grid.children).find(node => {
+            const idEl = node.querySelector('.m-id');
+            return idEl && idEl.innerText === m.id;
+        });
+        if (!card) continue;
+        const statusEl = card.querySelector('.m-api-status');
+        if (!statusEl) continue;
+        if (provider === 'fireworks' && info.status === 'unavailable') {
+            card.remove();
+            continue;
+        }
+        statusEl.className = `m-api-status ${info.status}`;
+        const valueEl = statusEl.querySelector('.m-api-status-value');
+        if (valueEl) valueEl.innerText = info.label;
+    }
 }
 
 function showModelModal(m) {
     currentModalModel = m;
+    const selectedProvider = state.searchProvider || state.provider || 'hf';
     const modal = document.getElementById('modelConfirmModal');
     document.getElementById('modalModelName').innerText = m.name;
     document.getElementById('modalModelId').innerText = m.id;
@@ -796,8 +1033,10 @@ function showModelModal(m) {
     
     const tags = document.getElementById('modalModelTags');
     tags.innerHTML = m.tags.map(t => `<span class="m-tag">${t}</span>`).join('');
+    updateModelModalMeta(m, selectedProvider, state.apiChecks[`${selectedProvider}:${m.id}`] || null);
     
     document.getElementById('modalConfirmBtn').onclick = () => {
+        setProvider(selectedProvider);
         setActiveModel(m, false);
         closeModal();
     };
@@ -822,6 +1061,7 @@ function showModelModal(m) {
     }
 
     const dlBtn = document.getElementById('modalDownloadBtn');
+    const apiBtn = document.getElementById('modalConfirmBtn');
     if (m.is_downloaded) {
         dlBtn.innerText = "🧠 Cargar local";
         dlBtn.onclick = () => {
@@ -837,7 +1077,79 @@ function showModelModal(m) {
         };
     }
 
+    apiBtn.disabled = true;
+    apiBtn.innerText = 'Verificando API...';
+
     modal.style.display = 'flex';
+    verifyModelApiAvailability(m, selectedProvider);
+}
+
+function getLocalStatusLabel(m) {
+    if (m.is_downloaded) return 'Descargado';
+    if (m.is_partial) return 'Descarga parcial';
+    return 'No descargado';
+}
+
+function getRecommendedUsageLabel(m, apiInfo) {
+    if (apiInfo && apiInfo.status === 'available') {
+        return m.is_downloaded ? 'API o local' : 'API';
+    }
+    if (apiInfo && apiInfo.status === 'unavailable') {
+        return m.is_downloaded ? 'Local' : 'Descargar local';
+    }
+    return m.is_downloaded ? 'Local o API sin verificar' : 'API sin verificar';
+}
+
+function updateModelModalMeta(m, provider, apiInfo) {
+    const metaGrid = document.getElementById('modalMetaGrid');
+    const apiBtn = document.getElementById('modalConfirmBtn');
+    const metaItems = [];
+    const addMeta = (label, value) => {
+        if (value === undefined || value === null || value === '') return;
+        metaItems.push(`
+            <div class="modal-meta-card">
+                <span class="modal-meta-label">${label}</span>
+                <span class="modal-meta-value">${value}</span>
+            </div>
+        `);
+    };
+
+    addMeta('Task', m.pipeline_tag || 'chat');
+    addMeta('Likes', typeof m.likes === 'number' ? m.likes.toLocaleString('es-AR') : null);
+    addMeta('Descargas', typeof m.downloads === 'number' ? m.downloads.toLocaleString('es-AR') : null);
+    addMeta('Soporte', m.supports_vision ? 'Vision + texto' : 'Solo texto');
+    addMeta('Arquitectura', Array.isArray(m.architectures) && m.architectures.length ? m.architectures.join(', ') : null);
+    addMeta('Tipo', m.model_type || null);
+    addMeta('Proveedor elegido', provider.toUpperCase());
+    addMeta('Estado local', getLocalStatusLabel(m));
+    addMeta(
+        provider === 'hf' ? 'API HF' : 'Estado API',
+        apiInfo ? `${apiInfo.label}${apiInfo.mode ? ` (${apiInfo.mode})` : ''}` : 'Verificando...'
+    );
+    addMeta('Uso recomendado', getRecommendedUsageLabel(m, apiInfo));
+    if (apiInfo && apiInfo.detail) {
+        addMeta('Detalle API', apiInfo.detail);
+    }
+    metaGrid.innerHTML = metaItems.join('');
+
+    if (!apiBtn) return;
+    if (!apiInfo) {
+        apiBtn.disabled = true;
+        apiBtn.innerText = 'Verificando API...';
+    } else if (apiInfo.status === 'unavailable') {
+        apiBtn.disabled = true;
+        apiBtn.innerText = 'API no disponible';
+    } else {
+        apiBtn.disabled = false;
+        apiBtn.innerText = `Usar vía ${provider.toUpperCase()}`;
+    }
+}
+
+async function verifyModelApiAvailability(m, provider) {
+    const data = await fetchModelApiAvailability(m.id, provider);
+    if (currentModalModel && currentModalModel.id === m.id) {
+        updateModelModalMeta(m, provider, data);
+    }
 }
 
 function setActiveModel(m, isLocal) {
@@ -916,6 +1228,14 @@ async function searchModels() {
     grid.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><span>Buscando...</span></div>';
     document.getElementById('searchResultsSection').style.display = 'block';
 
+    let currentKey = state.hfToken;
+    if (state.searchProvider === 'groq') currentKey = state.groqToken;
+    if (state.searchProvider === 'openrouter') currentKey = state.openrouterToken;
+    if (state.searchProvider === 'together') currentKey = state.togetherToken;
+    if (state.searchProvider === 'deepinfra') currentKey = state.deepinfraToken;
+    if (state.searchProvider === 'fireworks') currentKey = state.fireworksToken;
+    if (state.searchProvider === 'baseten') currentKey = state.basetenToken;
+
     try {
         const res = await fetch('/models/search', {
             method: 'POST',
@@ -925,6 +1245,8 @@ async function searchModels() {
                 limit: 10,
                 task: document.getElementById('taskFilter').value,
                 size_filter: document.getElementById('sizeFilter').value,
+                provider: state.searchProvider,
+                api_key: currentKey,
                 use_ai_search: document.getElementById('aiSearchToggle').checked
             })
         });
@@ -996,7 +1318,7 @@ async function cancelDownload() {
     } catch (e) { showToast(e.message, "error"); }
 }
 
-function listenDownloadProgress(modelId) {
+function listenModelProgress(modelId, mode = 'download') {
     const encodedId = modelId.split('/').map(encodeURIComponent).join('/');
     const es = new EventSource(`/models/download/${encodedId}/progress`);
 
@@ -1013,8 +1335,7 @@ function listenDownloadProgress(modelId) {
         const modalId = document.getElementById('dlModalModelId')?.innerText;
         const modalOpen = document.getElementById('downloadModal')?.style.display !== 'none';
 
-        if (modalOpen && modalId === modelId) {
-            // Progreso de descarga
+        if (modalOpen && modalId === modelId && mode === 'download') {
             if (dl.size_downloaded_gb !== undefined) {
                 const pct = dl.progress || 0;
                 document.getElementById('dlDownloadBar').style.width = pct + '%';
@@ -1023,7 +1344,6 @@ function listenDownloadProgress(modelId) {
                 const gb = (dl.size_downloaded_gb || 0).toFixed(2);
                 document.getElementById('dlDownloadSize').innerText = `${gb} GB descargados`;
             }
-            // Progreso de carga en memoria
             if (ld.status === 'loading' || ld.status === 'loaded') {
                 document.getElementById('dlSectionLoad').style.display = 'block';
                 const lpct = ld.progress || 0;
@@ -1033,13 +1353,17 @@ function listenDownloadProgress(modelId) {
             }
         }
 
-        // Descarga completada
-        if (dl.status === 'done') {
+        if (modalOpen && modalId === modelId && mode === 'load') {
+            const lpct = ld.progress || 0;
+            document.getElementById('dlLoadBar').style.width = lpct + '%';
+            document.getElementById('dlLoadPct').innerText = lpct + '%';
+            if (ld.message) document.getElementById('dlLoadMsg').innerText = ld.message;
+        }
+
+        if (mode === 'download' && dl.status === 'done') {
             delete state.downloading[modelId];
-            // Refrescar listas
             loadLocalModels();
             loadFeaturedModels();
-            // Si el modal sigue abierto para este modelo, ir al paso de carga
             if (modalOpen && modalId === modelId) {
                 currentModalModel = { ...currentModalModel, is_downloaded: true, is_complete: true };
                 showLoadStep(currentModalModel);
@@ -1049,22 +1373,48 @@ function listenDownloadProgress(modelId) {
             }
         }
 
-        // Carga en memoria completada
-        if (ld.status === 'loaded' && modalOpen && modalId === modelId) {
-            document.getElementById('dlLoadMsg').innerText = '✓ Listo para usar';
-            document.getElementById('dlLoadBar').style.width = '100%';
-            document.getElementById('dlLoadPct').innerText = '100%';
-            document.getElementById('dlModalActionsLoad').style.display = 'flex';
+        if (ld.status === 'loaded') {
+            if (mode === 'load') {
+                es.close();
+                loadLocalModels();
+                loadFeaturedModels();
+                showToast('✅ Modelo cargado en memoria', 'success');
+            }
+            if (modalOpen && modalId === modelId) {
+                document.getElementById('dlLoadMsg').innerText = '✓ Modelo cargado y listo';
+                document.getElementById('dlLoadBar').style.width = '100%';
+                document.getElementById('dlLoadPct').innerText = '100%';
+                document.getElementById('dlModalActionsLoad').style.display = 'flex';
+                const loadBtn = document.getElementById('dlLoadBtn');
+                if (loadBtn) {
+                    loadBtn.disabled = false;
+                    loadBtn.innerText = '🧠 Cargar en memoria';
+                }
+            }
         }
 
-        if (dl.status === 'error') {
+        if (mode === 'download' && dl.status === 'error') {
             delete state.downloading[modelId];
             showToast('❌ Error en descarga: ' + (dl.message || ''), 'error');
             es.close();
         }
+        if (mode === 'load' && ld.status === 'error') {
+            es.close();
+            const msg = ld.message || 'Error desconocido';
+            showToast('❌ Error al cargar: ' + msg, 'error');
+            if (modalOpen && modalId === modelId) {
+                document.getElementById('dlLoadMsg').innerText = '❌ ' + msg;
+                document.getElementById('dlLoadBtn').disabled = false;
+                document.getElementById('dlLoadBtn').innerText = '🧠 Reintentar';
+            }
+        }
     };
 
     es.onerror = () => es.close();
+}
+
+function listenDownloadProgress(modelId) {
+    return listenModelProgress(modelId, 'download');
 }
 
 async function loadLocalModel() {
@@ -1092,7 +1442,6 @@ async function loadLocalModel() {
             throw new Error(err.detail || `Error ${res.status}`);
         }
         showToast('🧠 Cargando modelo en memoria...', 'info');
-        // Escuchar SSE de progreso (mismo endpoint que descarga, cubre estado de carga)
         listenLoadProgress(currentModalModel.id);
     } catch (e) {
         showToast(e.message, 'error');
@@ -1102,54 +1451,7 @@ async function loadLocalModel() {
 }
 
 function listenLoadProgress(modelId) {
-    const encodedId = modelId.split('/').map(encodeURIComponent).join('/');
-    const es = new EventSource(`/models/download/${encodedId}/progress`);
-
-    es.onmessage = (e) => {
-        let data;
-        try { data = JSON.parse(e.data); } catch { return; }
-        if (data._end) { es.close(); return; }
-
-        const ld = data.load || {};
-        const modalId   = document.getElementById('dlModalModelId')?.innerText;
-        const modalOpen = document.getElementById('downloadModal')?.style.display !== 'none';
-
-        if (modalOpen && modalId === modelId) {
-            const lpct = ld.progress || 0;
-            document.getElementById('dlLoadBar').style.width = lpct + '%';
-            document.getElementById('dlLoadPct').innerText = lpct + '%';
-            if (ld.message) document.getElementById('dlLoadMsg').innerText = ld.message;
-        }
-
-        if (ld.status === 'loaded') {
-            es.close();
-            // Refrescar lista local
-            loadLocalModels();
-            loadFeaturedModels();
-            showToast('✅ Modelo cargado en memoria', 'success');
-            if (modalOpen && modalId === modelId) {
-                document.getElementById('dlLoadMsg').innerText = '✓ Modelo cargado y listo';
-                document.getElementById('dlLoadBar').style.width = '100%';
-                document.getElementById('dlLoadPct').innerText = '100%';
-                document.getElementById('dlModalActionsLoad').style.display = 'flex';
-                document.getElementById('dlLoadBtn').disabled = false;
-                document.getElementById('dlLoadBtn').innerText = '🧠 Cargar en memoria';
-            }
-        }
-
-        if (ld.status === 'error') {
-            es.close();
-            const msg = ld.message || 'Error desconocido';
-            showToast('❌ Error al cargar: ' + msg, 'error');
-            if (modalOpen && modalId === modelId) {
-                document.getElementById('dlLoadMsg').innerText = '❌ ' + msg;
-                document.getElementById('dlLoadBtn').disabled = false;
-                document.getElementById('dlLoadBtn').innerText = '🧠 Reintentar';
-            }
-        }
-    };
-
-    es.onerror = () => es.close();
+    return listenModelProgress(modelId, 'load');
 }
 
 function useLocalModel() {
