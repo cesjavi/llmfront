@@ -4,6 +4,8 @@ huggingface_hub>=0.22.0
 sse-starlette>=1.8.2
 python-dotenv>=1.0.0
 requests>=2.31.0
+openai>=1.0.0
+
 
 # ─── Inferencia Local ───────────────────────────────
 # Descomentar para habilitar ejecución local de modelos:
