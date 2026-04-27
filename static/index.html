@@ -76,6 +76,7 @@
         <option value="deepinfra">DeepInfra</option>
         <option value="fireworks">Fireworks AI</option>
         <option value="baseten">Baseten</option>
+        <option value="nvidia">NVIDIA</option>
       </select>
     </div>
     <div class="token-input-wrap">
@@ -86,6 +87,7 @@
       <input type="password" id="deepinfraTokenInput" class="token-input" placeholder="DeepInfra token" style="display:none;" />
       <input type="password" id="fireworksTokenInput" class="token-input" placeholder="Fireworks API key" style="display:none;" />
       <input type="password" id="basetenTokenInput" class="token-input" placeholder="Baseten API key" style="display:none;" />
+      <input type="password" id="nvidiaTokenInput" class="token-input" placeholder="nvapi-..." style="display:none;" />
       <button class="change-model-btn token-save-btn" id="saveTokenBtn" title="Guardar token">💾</button>
     </div>
     <div class="token-hint" id="tokenHint">Necesario para modo API. <a href="https://huggingface.co/settings/tokens" target="_blank">Obtener token</a></div>
@@ -123,6 +125,7 @@
           <option value="deepinfra">🛰️ DeepInfra</option>
           <option value="fireworks">🎆 Fireworks</option>
           <option value="baseten">🏗️ Baseten</option>
+          <option value="nvidia">🟢 NVIDIA</option>
         </select>
         <button class="mode-btn" id="modeLocalBtn" onclick="setMode('local')">
           💻 Local
@@ -236,6 +239,7 @@
           <option value="deepinfra">🛰️ DeepInfra</option>
           <option value="fireworks">🎆 Fireworks</option>
           <option value="baseten">🏗️ Baseten</option>
+          <option value="nvidia">🟢 NVIDIA</option>
         </select>
         <div class="config-hint" style="margin-top: 8px">Este selector se sincroniza con el chat y con el buscador de modelos.</div>
       </div>
@@ -366,6 +370,7 @@
           <option value="deepinfra">🛰️ DeepInfra</option>
           <option value="fireworks">🎆 Fireworks</option>
           <option value="baseten">🏗️ Baseten</option>
+          <option value="nvidia">🟢 NVIDIA</option>
         </select>
         <button class="search-btn" onclick="searchModels()">
           <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
@@ -438,7 +443,7 @@
       <button class="canvas-tab" onclick="switchCanvasTab('code')" id="canvasTabCode">💻 Código</button>
     </div>
     <div class="canvas-content active" id="canvasPreviewWrap">
-      <iframe id="canvasIframe" sandbox="allow-scripts allow-modals"></iframe>
+      <iframe id="canvasIframe" sandbox="allow-scripts allow-modals allow-same-origin"></iframe>
     </div>
     <div class="canvas-content" id="canvasCodeWrap" style="display:none;">
       <textarea id="canvasCodeEditor" spellcheck="false"></textarea>

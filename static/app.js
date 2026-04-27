@@ -14,6 +14,7 @@ let state = {
     deepinfraToken: localStorage.getItem('deepinfra_token') || '',
     fireworksToken: localStorage.getItem('fireworks_token') || '',
     basetenToken: localStorage.getItem('baseten_token') || '',
+    nvidiaToken: localStorage.getItem('nvidia_token') || '',
     provider: localStorage.getItem('selected_provider') || 'hf',
     searchProvider: localStorage.getItem('selected_provider') || 'hf',
     apiChecks: {},
@@ -35,6 +36,7 @@ async function preloadConfigBackedProviders() {
             ['deepinfraToken', 'deepinfraTokenInput', cfg.deepinfra_available],
             ['fireworksToken', 'fireworksTokenInput', cfg.fireworks_available],
             ['basetenToken', 'basetenTokenInput', cfg.baseten_available],
+            ['nvidiaToken', 'nvidiaTokenInput', cfg.nvidia_available],
         ];
 
         configMap.forEach(([stateKey, inputId, available]) => {
@@ -59,6 +61,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (state.deepinfraToken) document.getElementById('deepinfraTokenInput').value = state.deepinfraToken;
     if (state.fireworksToken) document.getElementById('fireworksTokenInput').value = state.fireworksToken;
     if (state.basetenToken) document.getElementById('basetenTokenInput').value = state.basetenToken;
+    if (state.nvidiaToken) document.getElementById('nvidiaTokenInput').value = state.nvidiaToken;
     updateTokenInputVisibility();
     document.getElementById('searchProviderFilter').value = state.searchProvider;
     document.getElementById('configProviderSelect').value = state.provider;
@@ -143,6 +146,7 @@ async function sendMessage() {
     if (state.provider === 'deepinfra') currentKey = state.deepinfraToken;
     if (state.provider === 'fireworks') currentKey = state.fireworksToken;
     if (state.provider === 'baseten') currentKey = state.basetenToken;
+    if (state.provider === 'nvidia') currentKey = state.nvidiaToken;
 
     const payload = {
         model: state.activeModel.id,
@@ -199,8 +203,12 @@ async function sendMessage() {
                     if (!data) continue;
                     if (data.error) throw new Error(data.error);
                     if (data.token) {
-                        aiFullText += data.token;
-                        aiMsg.content = aiFullText;
+                        if (data.is_reasoning) {
+                            aiMsg.reasoning = (aiMsg.reasoning || '') + data.token;
+                        } else {
+                            aiFullText += data.token;
+                            aiMsg.content = aiFullText;
+                        }
                         renderMessages();
                         scroll();
                     }
@@ -226,8 +234,12 @@ async function sendMessage() {
                 if (!data) continue;
                 if (data.error) throw new Error(data.error);
                 if (data.token) {
-                    aiFullText += data.token;
-                    aiMsg.content = aiFullText;
+                    if (data.is_reasoning) {
+                        aiMsg.reasoning = (aiMsg.reasoning || '') + data.token;
+                    } else {
+                        aiFullText += data.token;
+                        aiMsg.content = aiFullText;
+                    }
                 }
                 if (data.done) {
                     aiMsg.thinking = false;
@@ -271,8 +283,15 @@ function renderMessages() {
         }
         
         const text = msg.content || '';
-        const mdText = msg.thinking ? '<span class="thinking-dots"><span>.</span><span>.</span><span>.</span></span>' : formatMarkdown(text);
+        let mdText = msg.thinking ? '<span class="thinking-dots"><span>.</span><span>.</span><span>.</span></span>' : formatMarkdown(text);
         
+        if (msg.reasoning) {
+            mdText = `<div class="msg-reasoning">
+                <div class="reasoning-header">Razonamiento</div>
+                <div class="reasoning-body">${formatMarkdown(msg.reasoning)}</div>
+            </div>` + mdText;
+        }
+
         contentHtml += `<div class="msg-bubble">${mdText}</div>`;
         if (msg.tokens && !msg.thinking) {
             contentHtml += `<div class="msg-tokens" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; text-align: right;">Tokens: ${msg.tokens.prompt} en prompt / ${msg.tokens.completion} generados</div>`;
@@ -679,15 +698,14 @@ function switchModelsTab(tab) {
 
 function updateTokenInputVisibility() {
     const p = document.getElementById('keyProviderSelect').value;
-    document.getElementById('hfTokenInput').style.display = p === 'hf' ? 'block' : 'none';
-    document.getElementById('groqTokenInput').style.display = p === 'groq' ? 'block' : 'none';
-    document.getElementById('openrouterTokenInput').style.display = p === 'openrouter' ? 'block' : 'none';
-    document.getElementById('togetherTokenInput').style.display = p === 'together' ? 'block' : 'none';
-    document.getElementById('deepinfraTokenInput').style.display = p === 'deepinfra' ? 'block' : 'none';
-    document.getElementById('fireworksTokenInput').style.display = p === 'fireworks' ? 'block' : 'none';
-    document.getElementById('basetenTokenInput').style.display = p === 'baseten' ? 'block' : 'none';
+    const providers = ['hf', 'groq', 'openrouter', 'together', 'deepinfra', 'fireworks', 'baseten', 'nvidia'];
     
-    // hint updates
+    // Ocultar todos y mostrar solo el seleccionado
+    providers.forEach(id => {
+        const el = document.getElementById(id + 'TokenInput');
+        if (el) el.style.display = (p === id) ? 'block' : 'none';
+    });
+    
     const hints = {
         'hf': 'Necesario para modo API. <a href="https://huggingface.co/settings/tokens" target="_blank">Obtener token</a>',
         'groq': 'Necesario para usar Groq. <a href="https://console.groq.com/keys" target="_blank">Obtener API Key</a>',
@@ -695,23 +713,31 @@ function updateTokenInputVisibility() {
         'together': 'Necesario para usar Together AI. <a href="https://api.together.xyz/settings/api-keys" target="_blank">Obtener API Key</a>',
         'deepinfra': 'Necesario para usar DeepInfra. <a href="https://deepinfra.com/dash/api_keys" target="_blank">Obtener token</a>',
         'fireworks': 'Necesario para usar Fireworks AI. <a href="https://fireworks.ai/account/api-keys" target="_blank">Obtener API Key</a>',
-        'baseten': 'Necesario para usar Baseten. <a href="https://app.baseten.co/settings/api_keys" target="_blank">Obtener API Key</a>'
+        'baseten': 'Necesario para usar Baseten. <a href="https://app.baseten.co/settings/api_keys" target="_blank">Obtener API Key</a>',
+        'nvidia': 'Necesario para usar NVIDIA. <a href="https://build.nvidia.com/" target="_blank">Obtener API Key</a>'
     };
-    document.getElementById('tokenHint').innerHTML = hints[p];
+    
+    const hintEl = document.getElementById('tokenHint');
+    if (hintEl) {
+        hintEl.innerHTML = hints[p] || hints['hf'] || '';
+    }
 }
 
 function setProvider(provider) {
     state.provider = provider;
     localStorage.setItem('selected_provider', provider);
+    // Sincronizar todos los selectores
+    const selectors = ['chatProviderSelect', 'configProviderSelect', 'searchProviderFilter', 'keyProviderSelect'];
+    selectors.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = provider;
+    });
+
     if (provider !== 'local') {
         state.searchProvider = provider;
-        const searchProvider = document.getElementById('searchProviderFilter');
-        if (searchProvider) searchProvider.value = provider;
-        const chatProvider = document.getElementById('chatProviderSelect');
-        if (chatProvider) chatProvider.value = provider;
-        const configProvider = document.getElementById('configProviderSelect');
-        if (configProvider) configProvider.value = provider;
     }
+    
+    updateTokenInputVisibility();
     if (provider === 'local') {
         state.isLocal = true;
         document.getElementById('modeLocalBtn').classList.add('active');
@@ -754,6 +780,7 @@ function saveTokens() {
     state.deepinfraToken = document.getElementById('deepinfraTokenInput').value.trim();
     state.fireworksToken = document.getElementById('fireworksTokenInput').value.trim();
     state.basetenToken = document.getElementById('basetenTokenInput').value.trim();
+    state.nvidiaToken = document.getElementById('nvidiaTokenInput').value.trim();
     state.apiChecks = {};
     
     localStorage.setItem('hf_token', state.hfToken);
@@ -763,6 +790,7 @@ function saveTokens() {
     localStorage.setItem('deepinfra_token', state.deepinfraToken);
     localStorage.setItem('fireworks_token', state.fireworksToken);
     localStorage.setItem('baseten_token', state.basetenToken);
+    localStorage.setItem('nvidia_token', state.nvidiaToken);
     showToast("API Keys guardadas", "success");
 }
 
@@ -982,6 +1010,7 @@ function getProviderApiKey(provider) {
     if (provider === 'deepinfra') return state.deepinfraToken;
     if (provider === 'fireworks') return state.fireworksToken;
     if (provider === 'baseten') return state.basetenToken;
+    if (provider === 'nvidia') return state.nvidiaToken;
     return state.hfToken;
 }
 
@@ -1253,6 +1282,7 @@ async function searchModels() {
     if (state.searchProvider === 'deepinfra') currentKey = state.deepinfraToken;
     if (state.searchProvider === 'fireworks') currentKey = state.fireworksToken;
     if (state.searchProvider === 'baseten') currentKey = state.basetenToken;
+    if (state.searchProvider === 'nvidia') currentKey = state.nvidiaToken;
 
     try {
         const res = await fetch('/models/search', {

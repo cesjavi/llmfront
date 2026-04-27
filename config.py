@@ -13,7 +13,7 @@ LOCAL_MODE = LLMFRONT_MODE in ("local", "both")
 GROQ_AI_SEARCH_ENABLED = os.getenv("GROQ_AI_SEARCH_ENABLED", "true").lower() == "true"
 
 # Proveedores cloud soportados
-CLOUD_PROVIDERS = {"groq", "openrouter", "together", "deepinfra", "fireworks", "baseten"}
+CLOUD_PROVIDERS = {"groq", "openrouter", "together", "deepinfra", "fireworks", "baseten", "nvidia"}
 
 # URLs base de cada proveedor OpenAI-compatible
 PROVIDER_BASE_URLS = {
@@ -23,4 +23,5 @@ PROVIDER_BASE_URLS = {
     "deepinfra":  "https://api.deepinfra.com/v1/openai",
     "fireworks":  "https://api.fireworks.ai/inference/v1",
     "baseten":    "https://inference.baseten.co/v1",
+    "nvidia":     "https://integrate.api.nvidia.com/v1",
 }

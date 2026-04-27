@@ -17,7 +17,7 @@ from inference import stream_hf_api, stream_openai_compatible_api, stream_local
 logger = logging.getLogger("llmfront")
 router = APIRouter()
 
-CLOUD_PROVIDERS = {"groq", "openrouter", "together", "deepinfra", "fireworks", "baseten"}
+CLOUD_PROVIDERS = {"groq", "openrouter", "together", "deepinfra", "fireworks", "baseten", "nvidia"}
 
 
 @router.post("/chat/stream")

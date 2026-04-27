@@ -15,6 +15,7 @@ TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY", "")
 FIREWORKS_API_KEY = os.getenv("FIREWORKS_API_KEY", "")
 BASETEN_API_KEY = os.getenv("BASETEN_API_KEY", "")
 DEEPINFRA_API_KEY = os.getenv("DEEPINFRA_API_KEY", "")
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 
 MODELS_DIR = os.getenv("MODELS_DIR", os.path.join(os.getcwd(), "models_cache"))
 os.makedirs(MODELS_DIR, exist_ok=True)

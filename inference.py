@@ -16,7 +16,7 @@ from openai import AsyncOpenAI
 from schemas import ChatRequest, Message
 from state import (
     HF_TOKEN, GROQ_API_KEY, TOGETHER_API_KEY, FIREWORKS_API_KEY,
-    BASETEN_API_KEY, DEEPINFRA_API_KEY, _model_lock, _loaded_models,
+    BASETEN_API_KEY, DEEPINFRA_API_KEY, NVIDIA_API_KEY, _model_lock, _loaded_models,
 )
 from config import PROVIDER_BASE_URLS
 
@@ -186,7 +186,8 @@ async def stream_hf_api(req: ChatRequest) -> AsyncGenerator[str, None]:
 async def stream_openai_compatible_api(req: ChatRequest) -> AsyncGenerator[str, None]:
     env_keys = {"groq": GROQ_API_KEY, "openrouter": os.getenv("OPENROUTER_API_KEY",""),
                 "together": TOGETHER_API_KEY, "deepinfra": DEEPINFRA_API_KEY,
-                "fireworks": FIREWORKS_API_KEY, "baseten": BASETEN_API_KEY}
+                "fireworks": FIREWORKS_API_KEY, "baseten": BASETEN_API_KEY,
+                "nvidia": NVIDIA_API_KEY}
     key = req.api_key or env_keys.get(req.provider, "")
     url = PROVIDER_BASE_URLS.get(req.provider)
     if not key or not url:
@@ -199,12 +200,28 @@ async def stream_openai_compatible_api(req: ChatRequest) -> AsyncGenerator[str, 
         completion_tokens = 0
         extra = {}
         if req.temperature > 0: extra["temperature"] = req.temperature
+        
+        # Soporte para razonamiento (DeepSeek en NVIDIA)
+        if req.provider == "nvidia":
+            extra["extra_body"] = {"chat_template_kwargs": {"thinking": True, "reasoning_effort": "high"}}
+
         stream = await client.chat.completions.create(model=req.model, messages=messages,
                                                       max_tokens=req.max_new_tokens, stream=True, **extra)
         async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
+            if not chunk.choices:
+                continue
+            
+            delta = chunk.choices[0].delta
+            
+            # Manejo de razonamiento
+            reasoning = getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
+            if reasoning:
+                yield f"data: {json.dumps({'token': reasoning, 'is_reasoning': True})}\n\n"
+            
+            # Manejo de contenido normal
+            if delta.content:
                 completion_tokens += 1
-                yield f"data: {json.dumps({'token': chunk.choices[0].delta.content})}\n\n"
+                yield f"data: {json.dumps({'token': delta.content})}\n\n"
         yield f"data: {json.dumps({'done': True, 'tokens': {'prompt': prompt_tokens, 'completion': completion_tokens}})}\n\n"
     except Exception as e:
         logger.error(f"Error in stream_openai_compatible_api: {e}")

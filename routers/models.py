@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from schemas import ModelSearchRequest, ModelApiCheckRequest
 from state import (
     HF_TOKEN, GROQ_API_KEY, TOGETHER_API_KEY, FIREWORKS_API_KEY,
-    BASETEN_API_KEY, DEEPINFRA_API_KEY, _model_lock, _loaded_models,
+    BASETEN_API_KEY, DEEPINFRA_API_KEY, NVIDIA_API_KEY, _model_lock, _loaded_models,
 )
 from config import GROQ_AI_SEARCH_ENABLED, PROVIDER_BASE_URLS
 from local.helpers import (
@@ -207,6 +207,17 @@ async def _search_baseten_models(query, size_filter, limit, api_key):
         except Exception: pass
     return models, "baseten"
 
+async def _search_nvidia_models(query, size_filter, limit, api_key):
+    if not api_key: raise HTTPException(400, "NVIDIA requiere API key.")
+    async with httpx.AsyncClient() as c:
+        resp = await c.get("https://integrate.api.nvidia.com/v1/models", headers={"Authorization":f"Bearer {api_key}"}, timeout=20)
+        resp.raise_for_status(); data = resp.json().get("data", [])
+    def mapper(item):
+        mid = item.get("id",""); tags = []
+        if item.get("owned_by"): tags.append(item["owned_by"])
+        return mid, mid.split("/")[-1].replace("-"," ").title(), f"Provider: {item.get('owned_by','nvidia')}", tags, "conversational", None
+    return _process_provider_items(data, query, size_filter, limit, mapper), "nvidia"
+
 async def search_huggingface(query, size_filter, limit, token=None):
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     fetch_limit = limit*4 if size_filter != "any" else limit
@@ -359,6 +370,7 @@ async def search_models_endpoint(req: ModelSearchRequest):
         elif provider == "together": models, src = await _search_together_models(query, req.size_filter, req.limit, api_key)
         elif provider == "fireworks": models, src = await _search_fireworks_models(query, req.size_filter, req.limit, api_key)
         elif provider == "baseten": models, src = await _search_baseten_models(query, req.size_filter, req.limit, api_key)
+        elif provider == "nvidia": models, src = await _search_nvidia_models(query, req.size_filter, req.limit, api_key)
         else: models, src = await search_huggingface(query, req.size_filter, req.limit, req.hf_token or HF_TOKEN)
         return {"models": models, "total": len(models), "source": src}
     except Exception as e:

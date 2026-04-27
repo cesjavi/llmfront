@@ -31,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from config import APP_VERSION, LLMFRONT_MODE, LOCAL_MODE
 from state import (
     HF_TOKEN, GROQ_API_KEY, TOGETHER_API_KEY, DEEPINFRA_API_KEY,
-    FIREWORKS_API_KEY, BASETEN_API_KEY,
+    FIREWORKS_API_KEY, BASETEN_API_KEY, NVIDIA_API_KEY,
 )
 import rag
 
@@ -97,6 +97,7 @@ async def get_config():
         "deepinfra_available": bool(DEEPINFRA_API_KEY),
         "fireworks_available": bool(FIREWORKS_API_KEY),
         "baseten_available": bool(BASETEN_API_KEY),
+        "nvidia_available": bool(NVIDIA_API_KEY),
     }
 
 @app.get("/system/info")
