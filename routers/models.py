@@ -303,7 +303,7 @@ async def get_featured_models():
 async def get_trending_models():
     try:
         from huggingface_hub import list_models
-        hf_models = list_models(sort="trending", limit=10, filter="text-generation", cardData=True)
+        hf_models = list_models(sort="likes", limit=10, filter="text-generation", cardData=True)
         models = []
         for m in hf_models:
             mid = m.modelId

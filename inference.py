@@ -90,10 +90,10 @@ async def stream_hf_api(req: ChatRequest) -> AsyncGenerator[str, None]:
                         if txt:
                             comp_ref[0] += 1
                             yield f"data: {json.dumps({'token': txt})}\n\n"
-            return True
+            return
         except Exception as e:
             logger.error(f"Raw HF chat fallback failed: {e}")
-            return False
+            return
 
     async def _try_text_generation(comp_ref: list):
         try:
@@ -107,10 +107,10 @@ async def stream_hf_api(req: ChatRequest) -> AsyncGenerator[str, None]:
                     comp_ref[0] += 1
                     yield f"data: {json.dumps({'token': token_text})}\n\n"
                 await asyncio.sleep(0)
-            return True
+            return
         except Exception as e:
             logger.error(f"HF text_generation fallback failed: {e}")
-            return False
+            return
 
     async def _try_image_generation():
         try:
@@ -127,10 +127,10 @@ async def stream_hf_api(req: ChatRequest) -> AsyncGenerator[str, None]:
             buf = BytesIO(); img.save(buf, format="JPEG")
             img_str = base64.b64encode(buf.getvalue()).decode()
             yield f"data: {json.dumps({'token': f'![Generada por {req.model}](data:image/jpeg;base64,{img_str})' + chr(10)})}\n\n"
-            return True
+            return
         except Exception as e:
             logger.error(f"HF image fallback failed: {e}")
-            return False
+            return
 
     try:
         prompt_tokens = len(str(messages)) // 4
