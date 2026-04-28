@@ -103,7 +103,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // Live update from canvas editor
     document.getElementById('canvasCodeEditor').addEventListener('input', function() {
         const iframe = document.getElementById('canvasIframe');
-        iframe.srcdoc = this.value;
+        // Usar un pequeño delay o reset para asegurar la actualización en algunos navegadores
+        iframe.srcdoc = '';
+        const val = this.value;
+        setTimeout(() => {
+            iframe.srcdoc = val;
+        }, 5);
     });
 });
 
@@ -326,9 +331,12 @@ function copyMessage(btn, idx) {
 }
 
 function copyCode(btn) {
-    const codeEl = btn.parentElement.nextElementSibling.querySelector('code');
+    const wrapper = btn.closest('.code-block-wrapper');
+    const codeEl = wrapper ? wrapper.querySelector('code') : null;
     if (codeEl) {
-        navigator.clipboard.writeText(codeEl.innerText).then(() => {
+        // Usar textContent para obtener el texto puro sin formato HTML
+        const textToCopy = codeEl.textContent;
+        navigator.clipboard.writeText(textToCopy).then(() => {
             const originalText = btn.innerText;
             btn.innerText = 'Copiado!';
             setTimeout(() => btn.innerText = originalText, 2000);

@@ -38,7 +38,11 @@ def _prepare_messages(req: ChatRequest) -> list:
             content.append({"type": "text", "text": msg.content or "Describe las imágenes."})
             messages.append({"role": "user", "content": content})
         else:
-            messages.append({"role": msg.role, "content": msg.content})
+            # Asegurar que el contenido no sea nulo ni vacío para evitar errores de API
+            msg_content = msg.content.strip() if msg.content else ""
+            if not msg_content and msg.role == "user":
+                msg_content = "..." # Fallback mínimo
+            messages.append({"role": msg.role, "content": msg_content})
     return messages
 
 
@@ -178,6 +182,7 @@ async def stream_hf_api(req: ChatRequest) -> AsyncGenerator[str, None]:
         if "403" in msg or "401" in msg: msg = "Token inválido o sin acceso al modelo."
         elif "404" in msg: msg = "Modelo no disponible en Inference API. Intentá descargarlo localmente."
         elif "503" in msg or "loading" in msg.lower(): msg = "El modelo está cargando en HF. Intentá en unos segundos."
+        elif "504" in msg: msg = "Tiempo de espera agotado (HF Gateway Timeout). El servidor de Hugging Face está saturado o el modelo es muy lento."
         yield f"data: {json.dumps({'error': msg})}\n\n"
 
 
